@@ -1,73 +1,35 @@
-# React + TypeScript + Vite
+# GuitarApp
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A desktop app for recording guitar takes over Guitar Pro tablature. Load a `.gp` file, see the tab scroll in real-time, and record yourself playing along with synced video.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Guitar Pro playback** -- Load `.gp`, `.gp3`, `.gp4`, `.gp5`, and `.gpx` files via AlphaTab. Auto-detects the guitar track. Tab-only display by default.
+- **Video recording** -- Records camera + audio with MediaRecorder while the tab plays back. Takes are auto-saved to `~/Videos/GuitarApp Takes/`.
+- **Takes Vault** -- Each recorded take is persisted in a local store, mapped to its source song. Tracks song title, artist, playback speed, and file path.
+- **Recent files** -- Quickly reopen recently played songs from the home screen. Shows song title, artist, and take count.
+- **BPM-accurate count-in** -- Count-in respects the song's tempo and time signature with an audible tick.
+- **Metronome** -- Toggle the built-in AlphaTab metronome during playback.
 
-## React Compiler
+## Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Electron** -- Desktop shell with native file dialogs and filesystem access
+- **React 19** + **TypeScript** -- Frontend UI
+- **Vite** -- Dev server and build tooling
+- **AlphaTab** -- Guitar Pro file parsing, tab rendering, and audio synthesis
+- **Tailwind CSS** -- Styling
+- **electron-store** -- Local JSON persistence for takes and recent files
 
-## Expanding the ESLint configuration
+## Development
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run electron:dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Build
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run electron:build:win   # Windows (NSIS installer)
+npm run electron:build:mac   # macOS (DMG)
 ```
