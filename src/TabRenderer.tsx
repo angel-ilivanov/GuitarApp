@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback } from 'react'
+import { useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react'
 import * as alphaTab from '@coderline/alphatab'
 
 interface TrackInfo {
@@ -6,11 +6,38 @@ interface TrackInfo {
   name: string
 }
 
-interface TabRendererProps {
-  onApiReady?: (api: alphaTab.AlphaTabApi) => void
+// MIDI programs 24-31 are guitar instruments
+const GUITAR_MIDI_PROGRAMS = new Set([24, 25, 26, 27, 28, 29, 30, 31])
+const GUITAR_NAME_PATTERNS = /guitar|lead|gtr|rhythm|acoustic|electric|dist\./i
+
+function findGuitarTrack(tracks: alphaTab.model.Track[]): number {
+  // 1. Try matching by track name
+  const byName = tracks.find((t) => GUITAR_NAME_PATTERNS.test(t.name))
+  if (byName) return byName.index
+
+  // 2. Try matching by MIDI program (guitar patches 24-31)
+  const byProgram = tracks.find((t) =>
+    GUITAR_MIDI_PROGRAMS.has(t.playbackInfo.program)
+  )
+  if (byProgram) return byProgram.index
+
+  // 3. Fallback to first track
+  return 0
 }
 
-function TabRenderer({ onApiReady }: TabRendererProps) {
+export interface TabRendererHandle {
+  loadFromBuffer: (data: Uint8Array, fileName: string) => { title: string; artist: string } | null
+}
+
+interface TabRendererProps {
+  onApiReady?: (api: alphaTab.AlphaTabApi) => void
+  onScoreLoaded?: () => void
+  onFileOpened?: (fileName: string, filePath: string, title: string, artist: string) => void
+  onSongClosed?: () => void
+}
+
+const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
+  function TabRenderer({ onApiReady, onScoreLoaded, onFileOpened, onSongClosed }, ref) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const apiRef = useRef<alphaTab.AlphaTabApi | null>(null)
@@ -26,6 +53,7 @@ function TabRenderer({ onApiReady }: TabRendererProps) {
 
     const settings = new alphaTab.Settings()
     settings.display.layoutMode = alphaTab.LayoutMode.Page
+    settings.display.staveProfile = alphaTab.StaveProfile.Tab
     settings.display.scale = 1.0
     settings.core.logLevel = alphaTab.LogLevel.Warning
     settings.core.fontDirectory = '/font/'
@@ -59,46 +87,60 @@ function TabRenderer({ onApiReady }: TabRendererProps) {
     onApiReady?.(api)
   }, [onApiReady])
 
-  const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file || !containerRef.current) return
-
+  const loadFromBuffer = useCallback((data: Uint8Array, name: string): { title: string; artist: string } | null => {
     setLoading(true)
-    setFileName(file.name)
-
-    // Lazily initialize the API on first file upload
+    setFileName(name)
     initApi()
 
-    const reader = new FileReader()
-    reader.onload = () => {
-      const data = new Uint8Array(reader.result as ArrayBuffer)
-      try {
-        const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(
-          data,
-          apiRef.current!.settings
-        )
-        scoreRef.current = score
+    try {
+      const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(
+        data,
+        apiRef.current!.settings
+      )
+      scoreRef.current = score
 
-        // Extract track info
-        const trackList = score.tracks.map((t) => ({
-          index: t.index,
-          name: t.name || `Track ${t.index + 1}`,
-        }))
-        setTracks(trackList)
-        setSelectedTrack(0)
+      const trackList = score.tracks.map((t) => ({
+        index: t.index,
+        name: t.name || `Track ${t.index + 1}`,
+      }))
+      setTracks(trackList)
 
-        apiRef.current!.renderScore(score, [0])
-        setLoaded(true)
-      } catch {
-        setLoading(false)
-        alert('Failed to load file. Please ensure it is a valid Guitar Pro file.')
-      }
+      const defaultTrack = findGuitarTrack(score.tracks)
+      setSelectedTrack(defaultTrack)
+
+      apiRef.current!.renderScore(score, [defaultTrack])
+      setLoaded(true)
+      onScoreLoaded?.()
+      return { title: score.title || '', artist: score.artist || '' }
+    } catch {
+      setLoading(false)
+      alert('Failed to load file. Please ensure it is a valid Guitar Pro file.')
+      return null
     }
-    reader.readAsArrayBuffer(file)
+  }, [initApi, onScoreLoaded])
 
-    // Reset input so the same file can be re-uploaded
-    e.target.value = ''
-  }, [initApi])
+  useImperativeHandle(ref, () => ({ loadFromBuffer }), [loadFromBuffer])
+
+  const openFile = useCallback(async () => {
+    const result = await window.electronAPI!.openFileDialog()
+    if (result.cancelled) return
+    const meta = loadFromBuffer(new Uint8Array(result.buffer!), result.fileName!)
+    onFileOpened?.(result.fileName!, result.filePath!, meta?.title || '', meta?.artist || '')
+  }, [loadFromBuffer, onFileOpened])
+
+  const resetToHome = useCallback(() => {
+    if (apiRef.current) {
+      apiRef.current.destroy()
+      apiRef.current = null
+    }
+    scoreRef.current = null
+    setLoaded(false)
+    setLoading(false)
+    setFileName('')
+    setTracks([])
+    setSelectedTrack(0)
+    onSongClosed?.()
+  }, [onSongClosed])
 
   const handleTrackChange = useCallback((trackIndex: number) => {
     if (!apiRef.current || !scoreRef.current) return
@@ -112,13 +154,7 @@ function TabRenderer({ onApiReady }: TabRendererProps) {
       {/* Header bar - upload + track selector */}
       <div className={`flex items-center justify-center shrink-0 ${loaded ? 'py-2 border-b border-zinc-800' : 'py-8'}`}>
         {!loaded ? (
-          <label className="cursor-pointer group">
-            <input
-              type="file"
-              accept=".gp,.gp3,.gp4,.gp5,.gpx"
-              onChange={handleFileUpload}
-              className="hidden"
-            />
+          <button onClick={openFile} className="cursor-pointer group">
             <div className="flex flex-col items-center gap-3">
               <div className="w-14 h-14 rounded-xl bg-zinc-800 border border-zinc-700 flex items-center justify-center group-hover:border-violet-500/60 group-hover:bg-zinc-700/80 transition-all">
                 <svg viewBox="0 0 24 24" className="w-6 h-6 text-zinc-400 group-hover:text-violet-400 transition-colors" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -126,11 +162,11 @@ function TabRenderer({ onApiReady }: TabRendererProps) {
                 </svg>
               </div>
               <div className="text-center">
-                <p className="text-zinc-400 text-sm font-medium">Upload Guitar Pro File</p>
+                <p className="text-zinc-400 text-sm font-medium">Open Guitar Pro File</p>
                 <p className="text-zinc-600 text-xs mt-1">.gp, .gp3, .gp4, .gp5, .gpx</p>
               </div>
             </div>
-          </label>
+          </button>
         ) : (
           <div className="flex items-center gap-3 px-4 w-full">
             {/* Track selector */}
@@ -151,15 +187,12 @@ function TabRenderer({ onApiReady }: TabRendererProps) {
             {tracks.length <= 1 && (
               <span className="text-zinc-500 text-xs font-mono truncate flex-1 min-w-0">{fileName}</span>
             )}
-            <label className="cursor-pointer text-xs text-violet-400 hover:text-violet-300 transition-colors shrink-0">
+            <button
+              onClick={resetToHome}
+              className="text-xs text-violet-400 hover:text-violet-300 transition-colors shrink-0"
+            >
               Change
-              <input
-                type="file"
-                accept=".gp,.gp3,.gp4,.gp5,.gpx"
-                onChange={handleFileUpload}
-                className="hidden"
-              />
-            </label>
+            </button>
           </div>
         )}
       </div>
@@ -185,6 +218,16 @@ function TabRenderer({ onApiReady }: TabRendererProps) {
       </div>
     </div>
   )
+})
+
+export function toggleStandardNotation(api: alphaTab.AlphaTabApi, showNotes: boolean) {
+  for (const track of api.tracks) {
+    for (const staff of track.staves) {
+      staff.showTablature = true
+      staff.showStandardNotation = showNotes
+    }
+  }
+  api.render()
 }
 
 export default TabRenderer

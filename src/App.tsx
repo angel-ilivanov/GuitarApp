@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as alphaTab from '@coderline/alphatab'
 import TabRenderer from './TabRenderer'
+import type { TabRendererHandle } from './TabRenderer'
 
 type AppState = 'idle' | 'countdown' | 'recording' | 'playing'
 
@@ -10,26 +11,32 @@ function App() {
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const alphaTabApiRef = useRef<alphaTab.AlphaTabApi | null>(null)
+  const tabRendererRef = useRef<TabRendererHandle>(null)
 
   const [appState, setAppState] = useState<AppState>('idle')
   const [countdown, setCountdown] = useState<number>(0)
   const [metronomeOn, setMetronomeOn] = useState(false)
-  const [cameraError, setCameraError] = useState(false)
+  const [cameraError, setCameraError] = useState<string | false>(false)
+  const [scoreLoaded, setScoreLoaded] = useState(false)
+  const [songFilename, setSongFilename] = useState('')
+  const [recentSongs, setRecentSongs] = useState<RecentSong[]>([])
 
   // Start camera on mount
   useEffect(() => {
     async function initCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          video: true,
           audio: true,
         })
         streamRef.current = stream
         if (videoRef.current) {
           videoRef.current.srcObject = stream
         }
-      } catch {
-        setCameraError(true)
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err))
+        console.error('getUserMedia failed:', e)
+        setCameraError(`${e.name}: ${e.message}`)
       }
     }
     initCamera()
@@ -38,21 +45,71 @@ function App() {
     }
   }, [])
 
+  // Fetch recent songs on mount
+  useEffect(() => {
+    window.electronAPI?.getRecentSongs().then(setRecentSongs)
+  }, [])
+
   const handleApiReady = useCallback((api: alphaTab.AlphaTabApi) => {
     alphaTabApiRef.current = api
   }, [])
 
-  const startCountdown = useCallback(() => {
-    setAppState('countdown')
-    setCountdown(4)
+  const handleFileOpened = useCallback((fileName: string, _filePath: string, title: string, artist: string) => {
+    setSongFilename(fileName)
+    window.electronAPI?.updateSongMeta(fileName, title, artist)
+    window.electronAPI?.getRecentSongs().then(setRecentSongs)
+  }, [])
 
-    let count = 4
+  const handleLoadRecent = useCallback(async (song: RecentSong) => {
+    const result = await window.electronAPI!.loadRecentFile(song.gpFilePath, song.songFilename)
+    if (result.error === 'file_not_found') {
+      alert('File no longer exists at the saved location.')
+      return
+    }
+    if (result.error) {
+      alert('Failed to read file.')
+      return
+    }
+    setSongFilename(song.songFilename)
+    const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), song.songFilename)
+    if (meta) {
+      window.electronAPI?.updateSongMeta(song.songFilename, meta.title, meta.artist)
+    }
+    window.electronAPI?.getRecentSongs().then(setRecentSongs)
+  }, [])
+
+  const playTick = useCallback((isFirst: boolean) => {
+    const ctx = new AudioContext()
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.frequency.value = isFirst ? 1000 : 800
+    gain.gain.setValueAtTime(0.5, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08)
+    osc.start(ctx.currentTime)
+    osc.stop(ctx.currentTime + 0.08)
+    osc.onended = () => ctx.close()
+  }, [])
+
+  const startCountdown = useCallback(() => {
+    const api = alphaTabApiRef.current
+    const score = api?.score
+    const bpm = score?.tempo ?? 120
+    const beats = score?.masterBars?.[0]?.timeSignatureNumerator ?? 4
+    const msPerBeat = 60000 / bpm
+
+    setAppState('countdown')
+    setCountdown(beats)
+    playTick(true)
+
+    let remaining = beats
     const interval = setInterval(() => {
-      count--
-      if (count === 0) {
+      remaining--
+      if (remaining === 0) {
         clearInterval(interval)
         setCountdown(0)
-        // State B: Start recording + start AlphaTab playback
+        // Start recording + start AlphaTab playback
         if (streamRef.current) {
           const recorder = new MediaRecorder(streamRef.current, {
             mimeType: 'video/webm;codecs=vp9,opus',
@@ -61,26 +118,25 @@ function App() {
           recorder.ondataavailable = (e) => {
             if (e.data.size > 0) chunksRef.current.push(e.data)
           }
-          recorder.onstop = () => {
+          recorder.onstop = async () => {
             const blob = new Blob(chunksRef.current, { type: 'video/webm' })
-            const url = URL.createObjectURL(blob)
-            const a = document.createElement('a')
-            a.href = url
-            a.download = `guitar-take-${Date.now()}.webm`
-            a.click()
-            URL.revokeObjectURL(url)
+            const buffer = await blob.arrayBuffer()
+            const result = await window.electronAPI!.saveVideoTake(buffer, songFilename)
+            if (result.success) {
+              console.log('Take saved:', result.path, result.take)
+            }
           }
           recorderRef.current = recorder
           recorder.start()
         }
-        // Start AlphaTab playback
         alphaTabApiRef.current?.play()
         setAppState('recording')
       } else {
-        setCountdown(count)
+        playTick(false)
+        setCountdown(remaining)
       }
-    }, 1000)
-  }, [])
+    }, msPerBeat)
+  }, [songFilename, playTick])
 
   const stopRecording = useCallback(() => {
     // State C: Stop recording + stop AlphaTab playback
@@ -104,8 +160,9 @@ function App() {
       {/* Top Half - Camera Viewport */}
       <div className="flex-1 relative bg-black overflow-hidden">
         {cameraError ? (
-          <div className="absolute inset-0 flex items-center justify-center text-zinc-500 text-sm">
-            Camera unavailable — check permissions
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-500 text-sm gap-1">
+            <span>Camera unavailable</span>
+            <code className="text-red-400 text-xs">{cameraError}</code>
           </div>
         ) : (
           <video
@@ -134,8 +191,15 @@ function App() {
       <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-30 flex items-center gap-5">
         {/* Metronome Toggle */}
         <button
-          onClick={() => setMetronomeOn(!metronomeOn)}
-          className={`w-12 h-12 rounded-full flex items-center justify-center backdrop-blur-md border transition-all ${
+          onClick={() => {
+            const next = !metronomeOn
+            setMetronomeOn(next)
+            if (alphaTabApiRef.current) {
+              alphaTabApiRef.current.metronomeVolume = next ? 1 : 0
+            }
+          }}
+          disabled={!scoreLoaded}
+          className={`w-12 h-12 rounded-full flex items-center justify-center backdrop-blur-md border transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
             metronomeOn
               ? 'bg-violet-500/30 border-violet-400/60 text-violet-300'
               : 'bg-zinc-800/70 border-zinc-600/50 text-zinc-400'
@@ -171,7 +235,7 @@ function App() {
         {/* Play / Stop Tab Button */}
         <button
           onClick={togglePlay}
-          disabled={appState === 'countdown' || appState === 'recording'}
+          disabled={!scoreLoaded || appState === 'countdown' || appState === 'recording'}
           className={`w-12 h-12 rounded-full flex items-center justify-center backdrop-blur-md border transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
             appState === 'playing'
               ? 'bg-emerald-500/30 border-emerald-400/60 text-emerald-300'
@@ -193,8 +257,45 @@ function App() {
       </div>
 
       {/* Bottom Half - Tablature Engine */}
-      <div className="flex-1 bg-zinc-900 border-t border-zinc-800 overflow-hidden min-h-0">
-        <TabRenderer onApiReady={handleApiReady} />
+      <div className="flex-1 bg-zinc-900 border-t border-zinc-800 overflow-hidden min-h-0 relative">
+        <TabRenderer
+          ref={tabRendererRef}
+          onApiReady={handleApiReady}
+          onScoreLoaded={() => setScoreLoaded(true)}
+          onFileOpened={handleFileOpened}
+          onSongClosed={() => {
+            recorderRef.current?.stop()
+            alphaTabApiRef.current?.stop()
+            setAppState('idle')
+            setScoreLoaded(false)
+          }}
+        />
+
+        {/* Recent Songs overlay — shown when no score is loaded */}
+        {!scoreLoaded && recentSongs.length > 0 && (
+          <div className="absolute bottom-0 left-0 right-0 px-6 pb-6">
+            <p className="text-zinc-600 text-[10px] font-mono uppercase tracking-widest mb-2">Recent</p>
+            <div className="flex flex-col gap-1">
+              {recentSongs.map((song) => (
+                <button
+                  key={song.gpFilePath}
+                  onClick={() => handleLoadRecent(song)}
+                  className="flex items-center justify-between px-3 py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-all text-left group"
+                >
+                  <span className="text-zinc-400 text-xs font-medium truncate group-hover:text-zinc-300 transition-colors">
+                    {song.title || song.songFilename}
+                    {song.artist && <span className="text-zinc-600 ml-1.5">— {song.artist}</span>}
+                  </span>
+                  {song.takesCount > 0 && (
+                    <span className="text-zinc-600 text-[10px] font-mono shrink-0 ml-3">
+                      {song.takesCount} {song.takesCount === 1 ? 'take' : 'takes'}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Countdown Overlay */}
