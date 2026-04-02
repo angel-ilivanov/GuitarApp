@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  --animate-countPulse: countPulse 1s ease-out;
+}
+
+@keyframes countPulse {
+  0% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  30% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* AlphaTab playback cursors */
+.at-cursor-bar {
+  background: rgba(167, 139, 250, 0.15);
+}
+
+.at-cursor-beat {
+  background: rgba(167, 139, 250, 0.8);
+  width: 3px;
+}
+
+.at-selection div {
+  background: rgba(167, 139, 250, 0.1);
+}
