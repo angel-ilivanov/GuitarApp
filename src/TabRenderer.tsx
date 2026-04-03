@@ -61,12 +61,12 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
     settings.core.useWorkers = false
     settings.core.engine = 'svg'
 
-    // Dark mode colors
+    // Dark mode colors — charcoal + amber accent
     settings.display.resources.staffLineColor = new alphaTab.model.Color(71, 85, 105, 255)       // slate-600
     settings.display.resources.barSeparatorColor = new alphaTab.model.Color(100, 116, 139, 255)   // slate-500
-    settings.display.resources.mainGlyphColor = new alphaTab.model.Color(226, 232, 240, 255)      // slate-200
+    settings.display.resources.mainGlyphColor = new alphaTab.model.Color(255, 255, 255, 255)      // white — crisp notation
     settings.display.resources.secondaryGlyphColor = new alphaTab.model.Color(148, 163, 184, 100) // slate-400
-    settings.display.resources.barNumberColor = new alphaTab.model.Color(167, 139, 250, 255)      // violet-400
+    settings.display.resources.barNumberColor = new alphaTab.model.Color(255, 183, 3, 255)        // amber accent
     settings.display.resources.scoreInfoColor = new alphaTab.model.Color(203, 213, 225, 255)      // slate-300
 
     // Player / synthesizer settings
@@ -156,8 +156,8 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
         {!loaded ? (
           <button onClick={openFile} className="cursor-pointer group">
             <div className="flex flex-col items-center gap-3">
-              <div className="w-14 h-14 rounded-xl bg-zinc-800 border border-zinc-700 flex items-center justify-center group-hover:border-violet-500/60 group-hover:bg-zinc-700/80 transition-all">
-                <svg viewBox="0 0 24 24" className="w-6 h-6 text-zinc-400 group-hover:text-violet-400 transition-colors" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <div className="w-14 h-14 rounded-xl bg-zinc-800 border border-zinc-700 flex items-center justify-center group-hover:border-amber-accent/60 group-hover:bg-zinc-700/80 transition-all">
+                <svg viewBox="0 0 24 24" className="w-6 h-6 text-zinc-400 group-hover:text-amber-accent transition-colors" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 5v14M5 12h14" />
                 </svg>
               </div>
@@ -174,8 +174,8 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
               <select
                 value={selectedTrack}
                 onChange={(e) => handleTrackChange(Number(e.target.value))}
-                className="bg-zinc-800 text-zinc-300 text-xs font-medium border border-zinc-700 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-violet-500/60 cursor-pointer flex-1 min-w-0 truncate appearance-none"
-                style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center', paddingRight: '28px' }}
+                className="bg-zinc-800 text-zinc-300 text-xs font-medium border border-zinc-700 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-amber-accent/60 cursor-pointer flex-1 min-w-0 truncate appearance-none"
+                style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23FFB703' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center', paddingRight: '28px' }}
               >
                 {tracks.map((t) => (
                   <option key={t.index} value={t.index}>
@@ -189,7 +189,7 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
             )}
             <button
               onClick={resetToHome}
-              className="text-xs text-violet-400 hover:text-violet-300 transition-colors shrink-0"
+              className="text-xs text-amber-accent hover:text-amber-glow transition-colors shrink-0"
             >
               Change
             </button>
@@ -200,7 +200,7 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
       {/* Loading indicator */}
       {loading && (
         <div className="flex items-center justify-center py-4 shrink-0">
-          <div className="w-5 h-5 border-2 border-zinc-700 border-t-violet-400 rounded-full animate-spin" />
+          <div className="w-5 h-5 border-2 border-zinc-700 border-t-amber-accent rounded-full animate-spin" />
           <span className="text-zinc-500 text-xs ml-2">Rendering...</span>
         </div>
       )}

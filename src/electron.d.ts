@@ -1,8 +1,12 @@
 interface Take {
   id: string
+  takeNumber: number
   date: string
   speed: number
   filePath: string
+  createdAt: string
+  rating?: number
+  name?: string
 }
 
 interface RecentSong {
@@ -27,14 +31,34 @@ interface LoadRecentResult {
   error?: string
 }
 
+interface SongObject {
+  id: string
+  title: string
+  artist: string
+  bpm: number
+  nextTakeNumber: number
+  paths: {
+    tabFile: string
+    takesFolder: string
+  }
+  stats: {
+    totalTakes: number
+  }
+}
+
 interface Window {
   electronAPI?: {
     isElectron: boolean
-    saveVideoTake: (buffer: ArrayBuffer, songFilename: string) => Promise<{ success: boolean; path?: string; take?: Take }>
+    saveVideoTake: (buffer: ArrayBuffer, songFilename: string, songName?: string) => Promise<{ success: boolean; path?: string; take?: Take }>
     getTakesForSong: (songFilename: string) => Promise<Take[]>
     openFileDialog: () => Promise<OpenFileResult>
     getRecentSongs: () => Promise<RecentSong[]>
     loadRecentFile: (filePath: string, songFilename: string) => Promise<LoadRecentResult>
     updateSongMeta: (songFilename: string, title: string, artist: string) => Promise<void>
+    deleteTake: (songFilename: string, takeId: string) => Promise<{ success: boolean }>
+    renameTake: (songFilename: string, takeId: string, name: string) => Promise<void>
+    updateTakeRating: (songFilename: string, takeId: string, rating: number) => Promise<void>
+    addNewSong: (filePath: string, title: string, artist: string, bpm: number) => Promise<SongObject>
+    getAllSongs: () => Promise<SongObject[]>
   }
 }

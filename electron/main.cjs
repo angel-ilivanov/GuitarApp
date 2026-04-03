@@ -1,18 +1,34 @@
 const { app, BrowserWindow, protocol, session, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const Store = require('electron-store').default;
 
 const store = new Store({
   name: 'takes-vault',
   schema: {
-    songs: { type: 'object', default: {} }
+    songs: { type: 'object', default: {} },
+    library: { type: 'array', default: [] }
   }
 });
 
+/** Sanitize a string for use as an OS folder name */
+function sanitizeFolderName(name) {
+  return (name || 'Unknown')
+    .replace(/[\\/:*?"<>|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100) || 'Unknown';
+}
+
 function getSongEntry(songFilename) {
   const songs = store.get('songs', {});
-  return songs[songFilename] || { takes: [] };
+  const entry = songs[songFilename] || { takes: [], nextTakeNumber: 1 };
+  // Backfill nextTakeNumber for entries created before this field existed
+  if (entry.nextTakeNumber == null) {
+    entry.nextTakeNumber = (entry.takes?.length || 0) + 1;
+  }
+  return entry;
 }
 
 function setSongEntry(songFilename, entry) {
@@ -34,6 +50,17 @@ protocol.registerSchemesAsPrivileged([
       supportFetchAPI: true,
       stream: true,
       corsEnabled: false,
+    },
+  },
+  {
+    scheme: 'take-video',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      bypassCSP: true,
+      corsEnabled: true,
     },
   },
 ]);
@@ -114,6 +141,74 @@ function setupMediaPermissions() {
 
   // Allow device enumeration so getUserMedia can discover cameras/mics
   session.defaultSession.setDevicePermissionHandler(() => true);
+}
+
+function setupTakeVideoProtocol() {
+  protocol.handle('take-video', (request) => {
+    // URL format: take-video://file/<encoded-absolute-path>
+    // Parse the raw URL string to avoid new URL() mangling custom schemes
+    const prefix = 'take-video://file/';
+    const rawUrl = request.url;
+    if (!rawUrl.startsWith(prefix)) {
+      return new Response('Bad Request: invalid URL format', { status: 400 });
+    }
+    const encodedPath = rawUrl.slice(prefix.length);
+    const filePath = decodeURIComponent(encodedPath);
+
+    // Security: only allow .webm files from the takes directory
+    const takesDir = path.join(app.getPath('videos'), 'GuitarApp Takes');
+    const normalizedPath = path.normalize(filePath);
+    if (!normalizedPath.startsWith(path.normalize(takesDir))) {
+      return new Response('Forbidden', { status: 403 });
+    }
+
+    if (!normalizedPath.endsWith('.webm')) {
+      return new Response('Forbidden: only .webm files allowed', { status: 403 });
+    }
+
+    try {
+      const stat = fs.statSync(normalizedPath);
+      const rangeHeader = request.headers.get('range');
+
+      const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Range',
+      };
+
+      if (rangeHeader) {
+        // Support range requests for video seeking
+        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+        const start = parseInt(match[1], 10);
+        const end = match[2] ? parseInt(match[2], 10) : stat.size - 1;
+        const chunkSize = end - start + 1;
+
+        const stream = fs.createReadStream(normalizedPath, { start, end });
+        return new Response(stream, {
+          status: 206,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'video/webm',
+            'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+            'Content-Length': String(chunkSize),
+            'Accept-Ranges': 'bytes',
+          },
+        });
+      }
+
+      const fileBuffer = fs.readFileSync(normalizedPath);
+      return new Response(fileBuffer, {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'video/webm',
+          'Content-Length': String(stat.size),
+          'Accept-Ranges': 'bytes',
+        },
+      });
+    } catch {
+      return new Response('Not Found', { status: 404 });
+    }
+  });
 }
 
 function setupProtocolHandler() {
@@ -211,23 +306,36 @@ function setupIPC() {
     setSongEntry(songFilename, entry);
   });
 
-  ipcMain.handle('save-video-take', async (_event, { buffer, songFilename }) => {
+  ipcMain.handle('save-video-take', async (_event, { buffer, songFilename, songName }) => {
     try {
-      const takesDir = path.join(app.getPath('videos'), 'GuitarApp Takes');
+      const safeName = sanitizeFolderName(songName || songFilename);
+      const takesDir = path.join(app.getPath('videos'), 'GuitarApp Takes', safeName);
       fs.mkdirSync(takesDir, { recursive: true });
       const timestamp = Date.now();
-      const filename = `guitar-take-${timestamp}.webm`;
+      // Kebab-case filename: lowercase, hyphens for spaces, no special chars
+      const kebabName = safeName
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+      const filename = `${kebabName || 'take'}-${timestamp}.webm`;
       const filePath = path.join(takesDir, filename);
       fs.writeFileSync(filePath, Buffer.from(buffer));
 
+      const entry = getSongEntry(songFilename);
+      const takeNumber = entry.nextTakeNumber;
+      entry.nextTakeNumber = takeNumber + 1;
+
       const take = {
         id: `take_${timestamp}`,
+        takeNumber,
         date: new Date(timestamp).toLocaleString(),
         speed: 100,
-        filePath
+        filePath,
+        createdAt: new Date(timestamp).toISOString(),
       };
 
-      const entry = getSongEntry(songFilename);
       entry.takes.push(take);
       entry.lastOpened = Date.now();
       setSongEntry(songFilename, entry);
@@ -239,7 +347,88 @@ function setupIPC() {
   });
 
   ipcMain.handle('get-takes-for-song', (_event, songFilename) => {
-    return getSongEntry(songFilename).takes;
+    const entry = getSongEntry(songFilename);
+    const validTakes = entry.takes.filter(take => fs.existsSync(take.filePath));
+
+    // Clean up ghost records if any files were missing
+    if (validTakes.length !== entry.takes.length) {
+      entry.takes = validTakes;
+      // Reset counter to 1 if all takes have been deleted
+      if (validTakes.length === 0) {
+        entry.nextTakeNumber = 1;
+      }
+      setSongEntry(songFilename, entry);
+    }
+
+    return validTakes;
+  });
+
+  ipcMain.handle('delete-take', (_event, { songFilename, takeId }) => {
+    const entry = getSongEntry(songFilename);
+    const take = entry.takes.find(t => t.id === takeId);
+    if (take) {
+      try { fs.unlinkSync(take.filePath); } catch {}
+      entry.takes = entry.takes.filter(t => t.id !== takeId);
+      if (entry.takes.length === 0) {
+        entry.nextTakeNumber = 1;
+      }
+      setSongEntry(songFilename, entry);
+    }
+    return { success: true };
+  });
+
+  ipcMain.handle('rename-take', (_event, { songFilename, takeId, name }) => {
+    const entry = getSongEntry(songFilename);
+    const take = entry.takes.find(t => t.id === takeId);
+    if (take) {
+      take.name = name;
+      setSongEntry(songFilename, entry);
+    }
+  });
+
+  ipcMain.handle('update-take-rating', (_event, { songFilename, takeId, rating }) => {
+    const entry = getSongEntry(songFilename);
+    const take = entry.takes.find(t => t.id === takeId);
+    if (take) {
+      take.rating = rating;
+      setSongEntry(songFilename, entry);
+    }
+  });
+
+  // ── Library handlers ──────────────────────────────────────
+
+  ipcMain.handle('add-new-song', (_event, { filePath, title, artist, bpm }) => {
+    const id = crypto.randomUUID();
+    const safeName = sanitizeFolderName(title || path.basename(filePath, path.extname(filePath)));
+    const takesFolder = path.join(app.getPath('videos'), 'GuitarApp Takes', safeName);
+
+    // Pre-create the empty takes folder on disk
+    fs.mkdirSync(takesFolder, { recursive: true });
+
+    const songObject = {
+      id,
+      title: title || '',
+      artist: artist || '',
+      bpm: bpm || 0,
+      nextTakeNumber: 1,
+      paths: {
+        tabFile: filePath,
+        takesFolder,
+      },
+      stats: {
+        totalTakes: 0,
+      },
+    };
+
+    const library = store.get('library', []);
+    library.push(songObject);
+    store.set('library', library);
+
+    return songObject;
+  });
+
+  ipcMain.handle('get-all-songs', () => {
+    return store.get('library', []);
   });
 }
 
@@ -248,6 +437,7 @@ app.whenReady().then(() => {
     setupProtocolHandler();
   }
 
+  setupTakeVideoProtocol();
   setupMediaPermissions();
   setupIPC();
   createWindow();
