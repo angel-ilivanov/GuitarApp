@@ -52,18 +52,20 @@ html, body, #root {
   overflow: hidden;
 }
 
-/* AlphaTab playback cursors */
+/* AlphaTab playback cursors — sleek minimal style */
 .at-cursor-bar {
-  background: rgba(255, 183, 3, 0.15);
+  background: transparent;
+  border-bottom: 2px solid rgba(255, 183, 3, 0.6);
 }
 
 .at-cursor-beat {
-  background: rgba(255, 183, 3, 0.8);
-  width: 3px;
+  background: rgba(255, 183, 3, 0.75);
+  width: 2px;
+  border-radius: 1px;
 }
 
 .at-selection div {
-  background: rgba(255, 183, 3, 0.1);
+  background: rgba(255, 183, 3, 0.06);
 }
 
 /* Custom scrollbar — sleek dark grey */

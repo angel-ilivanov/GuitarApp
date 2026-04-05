@@ -61,13 +61,28 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
     settings.core.useWorkers = false
     settings.core.engine = 'svg'
 
-    // Dark mode colors — charcoal + amber accent
-    settings.display.resources.staffLineColor = new alphaTab.model.Color(71, 85, 105, 255)       // slate-600
-    settings.display.resources.barSeparatorColor = new alphaTab.model.Color(100, 116, 139, 255)   // slate-500
+    // Dark mode colors — muted lines, bright notation
+    settings.display.resources.staffLineColor = new alphaTab.model.Color(58, 61, 70, 255)         // #3A3D46 — fades into background
+    settings.display.resources.barSeparatorColor = new alphaTab.model.Color(58, 61, 70, 255)      // #3A3D46 — matches staff lines
     settings.display.resources.mainGlyphColor = new alphaTab.model.Color(255, 255, 255, 255)      // white — crisp notation
     settings.display.resources.secondaryGlyphColor = new alphaTab.model.Color(148, 163, 184, 100) // slate-400
     settings.display.resources.barNumberColor = new alphaTab.model.Color(255, 183, 3, 255)        // amber accent
     settings.display.resources.scoreInfoColor = new alphaTab.model.Color(203, 213, 225, 255)      // slate-300
+
+    // Typography — Inter sans-serif, bold tab numbers
+    settings.display.resources.tablatureFont = new alphaTab.model.Font('Inter', 13, alphaTab.model.FontStyle.Bold)
+    settings.display.resources.graceFont = new alphaTab.model.Font('Inter', 9, alphaTab.model.FontStyle.Plain)
+    settings.display.resources.barNumberFont = new alphaTab.model.Font('Inter', 10, alphaTab.model.FontStyle.Bold)
+    settings.display.resources.titleFont = new alphaTab.model.Font('Inter', 28, alphaTab.model.FontStyle.Bold)
+    settings.display.resources.subTitleFont = new alphaTab.model.Font('Inter', 18, alphaTab.model.FontStyle.Plain)
+    settings.display.resources.wordsFont = new alphaTab.model.Font('Inter', 13, alphaTab.model.FontStyle.Plain)
+    settings.display.resources.effectFont = new alphaTab.model.Font('Inter', 11, alphaTab.model.FontStyle.Plain)
+    settings.display.resources.copyrightFont = new alphaTab.model.Font('Inter', 11, alphaTab.model.FontStyle.Plain)
+    settings.display.resources.markerFont = new alphaTab.model.Font('Inter', 12, alphaTab.model.FontStyle.Bold)
+
+    // Rhythm stems — simplified geometric bars
+    settings.notation.rhythmMode = alphaTab.TabRhythmMode.ShowWithBars
+    settings.notation.rhythmHeight = 15
 
     // Player / synthesizer settings
     settings.player.playerMode = alphaTab.PlayerMode.EnabledAutomatic

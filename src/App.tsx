@@ -3,6 +3,8 @@ import * as alphaTab from '@coderline/alphatab'
 import TabRenderer from './TabRenderer'
 import type { TabRendererHandle } from './TabRenderer'
 import TakeToast from './TakeToast'
+import SongLibrary from './SongLibrary'
+import { fetchAlbumArt } from './iTunesApi'
 
 type AppState = 'idle' | 'countdown' | 'recording' | 'playing'
 
@@ -108,6 +110,7 @@ function App() {
   const [appState, setAppState] = useState<AppState>('idle')
   const [countdown, setCountdown] = useState<number>(0)
   const [metronomeOn, setMetronomeOn] = useState(false)
+  const [countInEnabled, setCountInEnabled] = useState(true)
   const [cameraError, setCameraError] = useState<string | false>(false)
   const [scoreLoaded, setScoreLoaded] = useState(false)
   const [songFilename, setSongFilename] = useState('')
@@ -117,6 +120,9 @@ function App() {
   const [songArtist, setSongArtist] = useState('')
   const [bpm, setBpm] = useState(0)
   const [timeSig, setTimeSig] = useState('')
+
+  // Library refresh trigger
+  const [libraryRefreshKey, setLibraryRefreshKey] = useState(0)
 
   // Toast notification state
   const [toastTake, setToastTake] = useState<Take | null>(null)
@@ -192,11 +198,59 @@ function App() {
       extractScoreInfo()
       // Register the song in the library with BPM from the parsed score
       const scoreBpm = alphaTabApiRef.current?.score?.tempo ?? 0
-      window.electronAPI?.addNewSong(filePath, title, artist, scoreBpm).then((songObj) => {
+      window.electronAPI?.addNewSong(filePath, title, artist, scoreBpm).then(async (songObj) => {
         console.log('Song added to library:', songObj)
+        setLibraryRefreshKey(k => k + 1)
+        // Fetch album art from iTunes if not already set
+        if (!songObj.albumArt && (title || artist)) {
+          const artUrl = await fetchAlbumArt(title, artist)
+          if (artUrl) {
+            await window.electronAPI?.updateSongAlbumArt(songObj.id, artUrl)
+            setLibraryRefreshKey(k => k + 1)
+          }
+        }
       })
     }, 100)
   }, [loadTakes, extractScoreInfo])
+
+  const handleLoadFromLibrary = useCallback(async (song: SongObject) => {
+    const filePath = song.paths?.tabFile
+    if (!filePath) return
+    const songFilename = filePath.split(/[/\\]/).pop() || ''
+    const result = await window.electronAPI!.loadRecentFile(filePath, songFilename)
+    if (result.error === 'file_not_found') {
+      alert('File no longer exists at the saved location.')
+      return
+    }
+    if (result.error) {
+      alert('Failed to read file.')
+      return
+    }
+    setSongFilename(songFilename)
+    const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), songFilename)
+    if (meta) {
+      setSongTitle(meta.title)
+      setSongArtist(meta.artist)
+      window.electronAPI?.updateSongMeta(songFilename, meta.title, meta.artist)
+    }
+    window.electronAPI?.getRecentSongs().then(setRecentSongs)
+    loadTakes(songFilename)
+    setTimeout(extractScoreInfo, 100)
+  }, [loadTakes, extractScoreInfo])
+
+  const handleLibraryFileOpen = useCallback(() => {
+    tabRendererRef.current // trigger file open via TabRenderer's openFile
+    // We need to trigger the file dialog. We can call openFileDialog directly.
+    const doOpen = async () => {
+      const result = await window.electronAPI!.openFileDialog()
+      if (result.cancelled) return
+      const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), result.fileName!)
+      const title = meta?.title || ''
+      const artist = meta?.artist || ''
+      handleFileOpened(result.fileName!, result.filePath!, title, artist)
+    }
+    doOpen()
+  }, [handleFileOpened])
 
   const handleLoadRecent = useCallback(async (song: RecentSong) => {
     const result = await window.electronAPI!.loadRecentFile(song.gpFilePath, song.songFilename)
@@ -234,7 +288,47 @@ function App() {
     osc.onended = () => ctx.close()
   }, [])
 
+  const beginRecording = useCallback(() => {
+    if (streamRef.current) {
+      const recorder = new MediaRecorder(streamRef.current, {
+        mimeType: 'video/webm;codecs=vp9,opus',
+      })
+      chunksRef.current = []
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data)
+      }
+      recorder.onstop = async () => {
+        try {
+          const blob = new Blob(chunksRef.current, { type: 'video/webm' })
+          const arrayBuffer = await blob.arrayBuffer()
+          const buffer = new Uint8Array(arrayBuffer)
+          const result = await window.electronAPI!.saveVideoTake(buffer, songFilename, songTitle)
+          if (result.success) {
+            console.log('Take saved:', result.path, result.take)
+            if (result.take) {
+              const freshTakes = await window.electronAPI!.getTakesForSong(songFilename)
+              setTakes(freshTakes)
+              setToastTake(result.take)
+            }
+          }
+        } catch (err) {
+          console.error('Failed to save take:', err)
+        }
+      }
+      recorderRef.current = recorder
+      recorder.start()
+    }
+    alphaTabApiRef.current?.play()
+    setAppState('recording')
+  }, [songFilename, songTitle])
+
   const startCountdown = useCallback(() => {
+    if (!countInEnabled) {
+      // Skip count-in — start recording immediately
+      beginRecording()
+      return
+    }
+
     const api = alphaTabApiRef.current
     const score = api?.score
     const scoreBpm = score?.tempo ?? 120
@@ -251,38 +345,13 @@ function App() {
       if (remaining === 0) {
         clearInterval(interval)
         setCountdown(0)
-        if (streamRef.current) {
-          const recorder = new MediaRecorder(streamRef.current, {
-            mimeType: 'video/webm;codecs=vp9,opus',
-          })
-          chunksRef.current = []
-          recorder.ondataavailable = (e) => {
-            if (e.data.size > 0) chunksRef.current.push(e.data)
-          }
-          recorder.onstop = async () => {
-            const blob = new Blob(chunksRef.current, { type: 'video/webm' })
-            const buffer = await blob.arrayBuffer()
-            const result = await window.electronAPI!.saveVideoTake(buffer, songFilename, songTitle)
-            if (result.success) {
-              console.log('Take saved:', result.path, result.take)
-              if (result.take) {
-                const freshTakes = await window.electronAPI!.getTakesForSong(songFilename)
-                setTakes(freshTakes)
-                setToastTake(result.take)
-              }
-            }
-          }
-          recorderRef.current = recorder
-          recorder.start()
-        }
-        alphaTabApiRef.current?.play()
-        setAppState('recording')
+        beginRecording()
       } else {
         playTick(false)
         setCountdown(remaining)
       }
     }, msPerBeat)
-  }, [songFilename, playTick, loadTakes])
+  }, [countInEnabled, beginRecording, playTick])
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop()
@@ -317,12 +386,24 @@ function App() {
       if (e.key === 'Escape' && theaterTake) {
         setTheaterTake(null)
       }
-      if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey) {
+      if ((e.key === 'r' || e.key === 'R' || e.key === 'р' || e.key === 'Р') && !e.ctrlKey && !e.metaKey) {
         if (appState === 'recording') {
           stopRecording()
         } else if (appState === 'idle' && scoreLoaded && !cameraError) {
           startCountdown()
         }
+      }
+      if ((e.key === ' ' || e.key === 'k' || e.key === 'K' || e.key === 'к' || e.key === 'К') && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        if (scoreLoaded && (appState === 'idle' || appState === 'playing')) {
+          togglePlay()
+        }
+      }
+      if ((e.key === 'm' || e.key === 'M' || e.key === 'м' || e.key === 'М') && !e.ctrlKey && !e.metaKey) {
+        if (scoreLoaded) toggleMetronome()
+      }
+      if ((e.key === 'c' || e.key === 'C' || e.key === 'ц' || e.key === 'Ц') && !e.ctrlKey && !e.metaKey) {
+        if (scoreLoaded) setCountInEnabled(prev => !prev)
       }
       if (e.key === 'Enter') {
         e.preventDefault()
@@ -330,7 +411,7 @@ function App() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [theaterTake, appState, scoreLoaded, cameraError, startCountdown, stopRecording])
+  }, [theaterTake, appState, scoreLoaded, cameraError, startCountdown, stopRecording, togglePlay, toggleMetronome])
 
   const handleSongClosed = useCallback(() => {
     recorderRef.current?.stop()
@@ -342,6 +423,7 @@ function App() {
     setBpm(0)
     setTimeSig('')
     setTakes([])
+    setLibraryRefreshKey(k => k + 1)
   }, [])
 
   const closeTheater = useCallback(() => {
@@ -409,29 +491,14 @@ function App() {
             onSongClosed={handleSongClosed}
           />
 
-          {/* Recent Songs overlay — shown when no score is loaded */}
-          {!scoreLoaded && recentSongs.length > 0 && (
-            <div className="absolute bottom-0 left-0 right-0 px-6 pb-6">
-              <p className="text-zinc-600 text-[10px] font-mono uppercase tracking-widest mb-2">Recent</p>
-              <div className="flex flex-col gap-1">
-                {recentSongs.map((song) => (
-                  <button
-                    key={song.gpFilePath}
-                    onClick={() => handleLoadRecent(song)}
-                    className="flex items-center justify-between px-3 py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-all text-left group"
-                  >
-                    <span className="text-zinc-400 text-xs font-medium truncate group-hover:text-zinc-300 transition-colors">
-                      {song.title || song.songFilename}
-                      {song.artist && <span className="text-zinc-600 ml-1.5">— {song.artist}</span>}
-                    </span>
-                    {song.takesCount > 0 && (
-                      <span className="text-zinc-600 text-[10px] font-mono shrink-0 ml-3">
-                        {song.takesCount} {song.takesCount === 1 ? 'take' : 'takes'}
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
+          {/* Song Library — shown when no score is loaded */}
+          {!scoreLoaded && (
+            <div className="absolute inset-0 z-10 bg-charcoal">
+              <SongLibrary
+                onSongSelect={handleLoadFromLibrary}
+                onFileOpen={handleLibraryFileOpen}
+                refreshKey={libraryRefreshKey}
+              />
             </div>
           )}
         </div>
@@ -523,6 +590,24 @@ function App() {
               <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M12 2L8 22h8L12 2z" />
                 <line x1="12" y1="8" x2="18" y2="4" />
+              </svg>
+            </button>
+
+            {/* Count-In Toggle */}
+            <button
+              onClick={() => setCountInEnabled(prev => !prev)}
+              disabled={!scoreLoaded}
+              className={`w-9 h-9 rounded-full flex items-center justify-center border transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
+                countInEnabled
+                  ? 'bg-amber-accent/20 border-amber-accent/50 text-amber-accent'
+                  : 'bg-zinc-800 border-zinc-700 text-zinc-500 hover:border-zinc-600'
+              }`}
+              aria-label="Toggle count-in"
+              title={countInEnabled ? 'Count-in: ON' : 'Count-in: OFF'}
+            >
+              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 6v6l4 2" />
+                <circle cx="12" cy="12" r="10" />
               </svg>
             </button>
 

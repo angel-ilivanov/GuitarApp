@@ -37,6 +37,8 @@ interface SongObject {
   artist: string
   bpm: number
   nextTakeNumber: number
+  albumArt?: string
+  tuning?: string
   paths: {
     tabFile: string
     takesFolder: string
@@ -60,5 +62,7 @@ interface Window {
     updateTakeRating: (songFilename: string, takeId: string, rating: number) => Promise<void>
     addNewSong: (filePath: string, title: string, artist: string, bpm: number) => Promise<SongObject>
     getAllSongs: () => Promise<SongObject[]>
+    clearLibrary: () => Promise<void>
+    updateSongAlbumArt: (songId: string, albumArt: string) => Promise<void>
   }
 }

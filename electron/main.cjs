@@ -97,6 +97,7 @@ function createWindow() {
     height: 900,
     minWidth: 800,
     minHeight: 600,
+    show: false,
     title: 'GuitarApp',
     webPreferences: {
       contextIsolation: true,
@@ -108,6 +109,8 @@ function createWindow() {
 
   // Remove default menu bar
   win.setMenuBarVisibility(false);
+  win.maximize();
+  win.show();
 
   if (isDev) {
     win.loadURL('http://localhost:5173');
@@ -321,7 +324,9 @@ function setupIPC() {
         .replace(/^-|-$/g, '');
       const filename = `${kebabName || 'take'}-${timestamp}.webm`;
       const filePath = path.join(takesDir, filename);
-      fs.writeFileSync(filePath, Buffer.from(buffer));
+      // Copy into a fresh Buffer to avoid IPC stream-backed buffer issues
+      const data = Buffer.from(new Uint8Array(buffer));
+      fs.writeFileSync(filePath, data);
 
       const entry = getSongEntry(songFilename);
       const takeNumber = entry.nextTakeNumber;
@@ -398,6 +403,19 @@ function setupIPC() {
   // ── Library handlers ──────────────────────────────────────
 
   ipcMain.handle('add-new-song', (_event, { filePath, title, artist, bpm }) => {
+    const library = store.get('library', []);
+
+    // Avoid duplicates — match by tab file path
+    const existing = library.find(s => s.paths && s.paths.tabFile === filePath);
+    if (existing) {
+      // Update metadata in case it changed
+      existing.title = title || existing.title;
+      existing.artist = artist || existing.artist;
+      existing.bpm = bpm || existing.bpm;
+      store.set('library', library);
+      return existing;
+    }
+
     const id = crypto.randomUUID();
     const safeName = sanitizeFolderName(title || path.basename(filePath, path.extname(filePath)));
     const takesFolder = path.join(app.getPath('videos'), 'GuitarApp Takes', safeName);
@@ -420,7 +438,6 @@ function setupIPC() {
       },
     };
 
-    const library = store.get('library', []);
     library.push(songObject);
     store.set('library', library);
 
@@ -429,6 +446,19 @@ function setupIPC() {
 
   ipcMain.handle('get-all-songs', () => {
     return store.get('library', []);
+  });
+
+  ipcMain.handle('clear-library', () => {
+    store.set('library', []);
+  });
+
+  ipcMain.handle('update-song-album-art', (_event, { songId, albumArt }) => {
+    const library = store.get('library', []);
+    const song = library.find(s => s.id === songId);
+    if (song) {
+      song.albumArt = albumArt;
+      store.set('library', library);
+    }
   });
 }
 

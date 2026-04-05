@@ -13,4 +13,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateTakeRating: (songFilename, takeId, rating) => ipcRenderer.invoke('update-take-rating', { songFilename, takeId, rating }),
   addNewSong: (filePath, title, artist, bpm) => ipcRenderer.invoke('add-new-song', { filePath, title, artist, bpm }),
   getAllSongs: () => ipcRenderer.invoke('get-all-songs'),
+  clearLibrary: () => ipcRenderer.invoke('clear-library'),
+  updateSongAlbumArt: (songId, albumArt) => ipcRenderer.invoke('update-song-album-art', { songId, albumArt }),
 });
