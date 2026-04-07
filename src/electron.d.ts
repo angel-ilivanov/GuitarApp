@@ -50,6 +50,7 @@ interface Window {
     renameTake: (songId: string, takeId: string, name: string) => Promise<void>
     updateTakeRating: (songId: string, takeId: string, rating: number) => Promise<void>
     getAllSongs: () => Promise<Song[]>
+    showInFolder: (filePath: string) => Promise<void>
     clearLibrary: () => Promise<void>
   }
 }

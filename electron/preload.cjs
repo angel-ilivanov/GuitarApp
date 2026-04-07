@@ -11,5 +11,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   renameTake: (songId, takeId, name) => ipcRenderer.invoke('rename-take', { songId, takeId, name }),
   updateTakeRating: (songId, takeId, rating) => ipcRenderer.invoke('update-take-rating', { songId, takeId, rating }),
   getAllSongs: () => ipcRenderer.invoke('get-all-songs'),
+  showInFolder: (filePath) => ipcRenderer.invoke('show-in-folder', filePath),
   clearLibrary: () => ipcRenderer.invoke('clear-library'),
 });

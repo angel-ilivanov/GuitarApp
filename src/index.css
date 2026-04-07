@@ -1,3 +1,4 @@
+@import "plyr/dist/plyr.css";
 @import "tailwindcss";
 
 @theme {
@@ -138,4 +139,43 @@ html, body, #root {
   background: linear-gradient(90deg, #E09800, #FFB703, #FFCA40);
   height: 8px;
   border-radius: 4px;
+}
+
+/* Plyr — Analog Amber theme */
+.plyr {
+  --plyr-color-main: #FFB703;
+  --plyr-video-background: #000;
+  --plyr-range-fill-background: #FFB703;
+  --plyr-video-controls-background: linear-gradient(transparent, rgba(20, 20, 20, 0.8));
+  --plyr-range-thumb-background: #fff;
+  --plyr-range-thumb-shadow: 0 0 8px rgba(255, 183, 3, 0.5);
+  --plyr-audio-controls-background: #1E1E1E;
+  height: 100%;
+}
+
+/* Force pillar-boxing for non-16:9 source video */
+.plyr__video-wrapper {
+  height: 100%;
+  background: #000;
+}
+
+.plyr video,
+.plyr__video-wrapper video {
+  object-fit: contain !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Subtle amber glow on hover/active controls */
+.plyr__control:hover,
+.plyr__control[aria-expanded="true"] {
+  background: rgba(255, 183, 3, 0.15) !important;
+  box-shadow: 0 0 8px rgba(255, 183, 3, 0.3);
+  border-radius: 4px;
+}
+
+/* Amber glow on the progress bar fill */
+.plyr__progress__buffer,
+.plyr--full-ui input[type="range"] {
+  filter: drop-shadow(0 0 4px rgba(255, 183, 3, 0.3));
 }

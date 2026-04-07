@@ -1,4 +1,4 @@
-const { app, BrowserWindow, protocol, session, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, protocol, session, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -95,6 +95,16 @@ function sanitizeFolderName(name) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 100) || 'Unknown';
+}
+
+/** Convert a string to kebab-case for filenames */
+function toKebab(name) {
+  return (name || 'untitled')
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'untitled';
 }
 
 function getSong(songId) {
@@ -220,28 +230,28 @@ function setupMediaPermissions() {
 }
 
 function setupTakeVideoProtocol() {
-  protocol.handle('take-video', (request) => {
-    // URL format: take-video://file/<encoded-absolute-path>
-    const prefix = 'take-video://file/';
-    const rawUrl = request.url;
-    if (!rawUrl.startsWith(prefix)) {
-      return new Response('Bad Request: invalid URL format', { status: 400 });
-    }
-    const encodedPath = rawUrl.slice(prefix.length);
-    const filePath = decodeURIComponent(encodedPath);
-
-    // Security: only allow .webm files from the takes directory
-    const takesDir = path.join(app.getPath('videos'), 'GuitarApp Takes');
-    const normalizedPath = path.normalize(filePath);
-    if (!normalizedPath.startsWith(path.normalize(takesDir))) {
-      return new Response('Forbidden', { status: 403 });
-    }
-
-    if (!normalizedPath.endsWith('.webm')) {
-      return new Response('Forbidden: only .webm files allowed', { status: 403 });
-    }
-
+  protocol.handle('take-video', async (request) => {
     try {
+      // URL format: take-video://file/<encoded-absolute-path>
+      const prefix = 'take-video://file/';
+      const rawUrl = request.url;
+      if (!rawUrl.startsWith(prefix)) {
+        return new Response('Bad Request: invalid URL format', { status: 400 });
+      }
+      const encodedPath = rawUrl.slice(prefix.length);
+      const filePath = decodeURIComponent(encodedPath);
+
+      // Security: only allow .webm files from the takes directory
+      const takesDir = path.join(app.getPath('videos'), 'GuitarApp Takes');
+      const normalizedPath = path.normalize(filePath);
+      if (!normalizedPath.startsWith(path.normalize(takesDir))) {
+        return new Response('Forbidden', { status: 403 });
+      }
+
+      if (!normalizedPath.endsWith('.webm')) {
+        return new Response('Forbidden: only .webm files allowed', { status: 403 });
+      }
+
       const stat = fs.statSync(normalizedPath);
       const rangeHeader = request.headers.get('range');
 
@@ -257,8 +267,8 @@ function setupTakeVideoProtocol() {
         const end = match[2] ? parseInt(match[2], 10) : stat.size - 1;
         const chunkSize = end - start + 1;
 
-        // Use a buffer slice instead of a stream — Electron's protocol.handle
-        // can throw ERR_INVALID_STATE when a Node ReadableStream closes.
+        // Read into a buffer — Electron's protocol.handle throws
+        // ERR_INVALID_STATE with Node ReadableStreams.
         const fd = fs.openSync(normalizedPath, 'r');
         const chunk = Buffer.alloc(chunkSize);
         fs.readSync(fd, chunk, 0, chunkSize, start);
@@ -285,7 +295,10 @@ function setupTakeVideoProtocol() {
           'Accept-Ranges': 'bytes',
         },
       });
-    } catch {
+    } catch (err) {
+      // Catch-all prevents ERR_INVALID_STATE from surfacing as an
+      // uncaught exception dialog when requests race during rapid recording.
+      console.error('take-video protocol error:', err?.message || err);
       return new Response('Not Found', { status: 404 });
     }
   });
@@ -349,11 +362,35 @@ function setupIPC() {
       return { cancelled: false, buffer: new Uint8Array(fileBuffer), songId: existing.id, filePath };
     }
 
-    // Create new song
+    // Create new song — try to find an existing takes folder on disk
     const id = crypto.randomUUID();
     const fileName = path.basename(filePath, path.extname(filePath));
     const safeName = sanitizeFolderName(fileName);
-    const takesFolder = path.join(app.getPath('videos'), 'GuitarApp Takes', safeName);
+    const takesRoot = path.join(app.getPath('videos'), 'GuitarApp Takes');
+    let takesFolder = path.join(takesRoot, safeName);
+
+    // Scan for an existing takes folder that might belong to this file.
+    // GP files are often named "Artist - Title" or similar, so we check if
+    // any existing folder on disk matches the filename.
+    const existingTakes = [];
+    if (fs.existsSync(takesFolder)) {
+      // Found a folder matching the filename — scan for .webm files
+      try {
+        const files = fs.readdirSync(takesFolder).filter(f => f.endsWith('.webm'));
+        for (const file of files) {
+          const webmPath = path.join(takesFolder, file);
+          const stat = fs.statSync(webmPath);
+          existingTakes.push({
+            id: `take_${stat.mtimeMs | 0}`,
+            takeNumber: existingTakes.length + 1,
+            speed: 100,
+            filePath: webmPath,
+            createdAt: stat.mtime.toISOString(),
+          });
+        }
+      } catch {}
+    }
+
     fs.mkdirSync(takesFolder, { recursive: true });
 
     const song = {
@@ -363,8 +400,8 @@ function setupIPC() {
       bpm: 0,
       tuning: '',
       paths: { tabFile: filePath, takesFolder },
-      takes: [],
-      nextTakeNumber: 1,
+      takes: existingTakes,
+      nextTakeNumber: existingTakes.length + 1,
       lastOpened: Date.now(),
       createdAt: new Date().toISOString(),
     };
@@ -400,6 +437,53 @@ function setupIPC() {
         song[key] = fields[key];
       }
     }
+
+    // When the title is set, rename the takes folder to match (if it differs)
+    if (fields.title && song.paths.takesFolder) {
+      const takesRoot = path.join(app.getPath('videos'), 'GuitarApp Takes');
+      const idealFolder = path.join(takesRoot, sanitizeFolderName(fields.title));
+      const currentFolder = song.paths.takesFolder;
+
+      if (idealFolder !== currentFolder) {
+        // Check if the ideal folder already exists (from a previous session)
+        if (fs.existsSync(idealFolder) && !fs.existsSync(currentFolder)) {
+          // Ideal folder already exists (e.g. from before clear) — adopt it
+          song.paths.takesFolder = idealFolder;
+
+          // Re-scan for any existing takes on disk if song has none
+          if (song.takes.length === 0) {
+            try {
+              const files = fs.readdirSync(idealFolder).filter(f => f.endsWith('.webm'));
+              for (const file of files) {
+                const webmPath = path.join(idealFolder, file);
+                const stat = fs.statSync(webmPath);
+                song.takes.push({
+                  id: `take_${stat.mtimeMs | 0}`,
+                  takeNumber: song.takes.length + 1,
+                  speed: 100,
+                  filePath: webmPath,
+                  createdAt: stat.mtime.toISOString(),
+                });
+              }
+              song.nextTakeNumber = song.takes.length + 1;
+            } catch {}
+          }
+        } else if (fs.existsSync(currentFolder)) {
+          // Rename current folder to the ideal name
+          try {
+            fs.renameSync(currentFolder, idealFolder);
+            // Update file paths in all existing takes
+            for (const take of song.takes) {
+              take.filePath = take.filePath.replace(currentFolder, idealFolder);
+            }
+            song.paths.takesFolder = idealFolder;
+          } catch {
+            // Rename failed (e.g. cross-device) — keep current folder
+          }
+        }
+      }
+    }
+
     setSong(songId, song);
   });
 
@@ -416,7 +500,8 @@ function setupIPC() {
       song.nextTakeNumber = takeNumber + 1;
 
       const timestamp = Date.now();
-      const filename = `take-${takeNumber}-${timestamp}.webm`;
+      const songKebab = toKebab(song.title);
+      const filename = `${songKebab}-take-${takeNumber}-${timestamp}.webm`;
       const filePath = path.join(takesDir, filename);
 
       const data = Buffer.from(new Uint8Array(buffer));
@@ -467,9 +552,8 @@ function setupIPC() {
     if (take) {
       try { fs.unlinkSync(take.filePath); } catch {}
       song.takes = song.takes.filter(t => t.id !== takeId);
-      if (song.takes.length === 0) {
-        song.nextTakeNumber = 1;
-      }
+      const maxTakeNum = song.takes.reduce((max, t) => Math.max(max, t.takeNumber), 0);
+      song.nextTakeNumber = maxTakeNum + 1;
       setSong(songId, song);
     }
     return { success: true };
@@ -502,6 +586,11 @@ function setupIPC() {
   // Get all songs
   ipcMain.handle('get-all-songs', () => {
     return Object.values(store.get('songs', {}));
+  });
+
+  // Show file in OS file explorer
+  ipcMain.handle('show-in-folder', (_event, filePath) => {
+    shell.showItemInFolder(filePath);
   });
 
   // Clear entire library

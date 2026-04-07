@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import Plyr from 'plyr'
 import * as alphaTab from '@coderline/alphatab'
 import TabRenderer from './TabRenderer'
 import type { TabRendererHandle } from './TabRenderer'
 import TakeToast from './TakeToast'
 import SongLibrary from './SongLibrary'
+import TheaterActionBar from './TheaterActionBar'
 import { fetchAlbumArt } from './iTunesApi'
 
 type AppState = 'idle' | 'countdown' | 'recording' | 'playing'
@@ -139,6 +141,7 @@ function App() {
   // Theater Mode state
   const [theaterTake, setTheaterTake] = useState<Take | null>(null)
   const theaterVideoRef = useRef<HTMLVideoElement>(null)
+  const plyrRef = useRef<Plyr | null>(null)
 
   // Start camera on mount
   useEffect(() => {
@@ -437,7 +440,40 @@ function App() {
     setLibraryRefreshKey(k => k + 1)
   }, [])
 
+  useEffect(() => {
+    if (plyrRef.current) {
+      plyrRef.current.destroy()
+      plyrRef.current = null
+    }
+
+    if (theaterTake && theaterVideoRef.current) {
+      const player = new Plyr(theaterVideoRef.current, {
+        controls: ['play-large', 'play', 'progress', 'current-time', 'duration', 'mute', 'volume', 'fullscreen'],
+        keyboard: { focused: true, global: false },
+        tooltips: { controls: true, seek: true },
+        resetOnEnd: true,
+      })
+
+      player.on('ready', () => {
+        Promise.resolve(player.play()).catch(() => {})
+      })
+
+      plyrRef.current = player
+    }
+
+    return () => {
+      if (plyrRef.current) {
+        plyrRef.current.destroy()
+        plyrRef.current = null
+      }
+    }
+  }, [theaterTake])
+
   const closeTheater = useCallback(() => {
+    if (plyrRef.current) {
+      plyrRef.current.destroy()
+      plyrRef.current = null
+    }
     setTheaterTake(null)
   }, [])
 
@@ -724,21 +760,29 @@ function App() {
                   <p className="text-zinc-500 text-[10px] font-mono">{formatDate(take.createdAt)}</p>
                   <p className="text-zinc-600 text-[10px] font-mono">{take.speed}% Speed</p>
                 </div>
-                {/* Star rating */}
+                {/* Delete take */}
                 <button
                   onClick={(e) => {
                     e.stopPropagation()
-                    const newRating = take.rating ? 0 : 1
-                    window.electronAPI?.updateTakeRating(songId, take.id, newRating)
-                    setTakes(prev => prev.map(t => t.id === take.id ? { ...t, rating: newRating } : t))
+                    window.electronAPI?.deleteTake(songId, take.id)
+                    setTakes(prev => prev.filter(t => t.id !== take.id))
                   }}
-                  className="shrink-0 transition-all hover:scale-110"
-                  aria-label="Toggle star"
+                  className="shrink-0 opacity-0 group-hover:opacity-100 transition-all hover:scale-110 text-zinc-600 hover:text-red-500"
+                  aria-label="Delete take"
                 >
-                  <svg viewBox="0 0 24 24" className={`w-5 h-5 ${take.rating ? 'text-amber-accent fill-amber-accent' : 'text-zinc-700 fill-none'}`} stroke="currentColor" strokeWidth="1.5">
-                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 6h18" />
+                    <path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                    <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
                   </svg>
                 </button>
+                {/* Score + Icon rating */}
+                <div className={`shrink-0 flex items-center gap-1 font-mono text-[11px] ${take.rating ? 'text-amber-accent' : 'text-zinc-600'}`}>
+                  <svg viewBox="0 0 24 24" className={`w-3.5 h-3.5 ${take.rating ? 'fill-amber-accent' : 'fill-none'}`} stroke="currentColor" strokeWidth="1.5">
+                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                  </svg>
+                  <span>{take.rating ? `${take.rating}/5` : '--'}</span>
+                </div>
               </div>
             ))}
           </div>
@@ -772,21 +816,37 @@ function App() {
             <p className="text-zinc-500 text-xs font-mono">{formatDate(theaterTake.createdAt)} &middot; {theaterTake.speed}% Speed</p>
           </div>
 
-          {/* Video player — 70% width, 16:9 */}
+          {/* Video player + Action Bar */}
           <div
-            className="w-[70vw] max-h-[80vh] aspect-video rounded-lg overflow-hidden shadow-2xl"
+            className="flex flex-col items-center"
             onClick={(e) => e.stopPropagation()}
           >
-            <video
-              ref={theaterVideoRef}
-              src={takeVideoUrl(theaterTake.filePath)}
-              controls
-              autoPlay
-              className="w-full h-full bg-black"
-              onError={() => {
-                console.warn('Theater video failed to load — file may be missing:', theaterTake.filePath)
+            <div className="w-[70vw] aspect-video rounded-t-lg shadow-2xl bg-black overflow-hidden relative">
+              <video
+                ref={theaterVideoRef}
+                src={takeVideoUrl(theaterTake.filePath)}
+                className="absolute inset-0 w-full h-full object-contain"
+                onError={() => {
+                  console.warn('Theater video failed to load — file may be missing:', theaterTake.filePath)
+                  setTakes(prev => prev.filter(t => t.id !== theaterTake.id))
+                  setTheaterTake(null)
+                }}
+              />
+            </div>
+            <TheaterActionBar
+              take={theaterTake}
+              onRate={(rating) => {
+                window.electronAPI?.updateTakeRating(songId, theaterTake.id, rating)
+                setTakes(prev => prev.map(t => t.id === theaterTake.id ? { ...t, rating } : t))
+                setTheaterTake(prev => prev ? { ...prev, rating } : null)
+              }}
+              onDelete={() => {
+                window.electronAPI?.deleteTake(songId, theaterTake.id)
                 setTakes(prev => prev.filter(t => t.id !== theaterTake.id))
-                setTheaterTake(null)
+                closeTheater()
+              }}
+              onShowInFolder={() => {
+                window.electronAPI?.showInFolder(theaterTake.filePath)
               }}
             />
           </div>
