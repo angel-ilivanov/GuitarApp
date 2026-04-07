@@ -1,7 +1,6 @@
 interface Take {
   id: string
   takeNumber: number
-  date: string
   speed: number
   filePath: string
   createdAt: string
@@ -45,7 +44,7 @@ interface Window {
     openFileDialog: () => Promise<OpenFileResult>
     loadSongFile: (songId: string) => Promise<LoadSongFileResult>
     updateSong: (songId: string, fields: Partial<Pick<Song, 'title' | 'artist' | 'bpm' | 'tuning' | 'albumArt'>>) => Promise<void>
-    saveVideoTake: (buffer: ArrayBuffer, songId: string) => Promise<{ success: boolean; path?: string; take?: Take }>
+    saveVideoTake: (buffer: ArrayBuffer, songId: string, speed: number) => Promise<{ success: boolean; path?: string; take?: Take }>
     getTakesForSong: (songId: string) => Promise<Take[]>
     deleteTake: (songId: string, takeId: string) => Promise<{ success: boolean }>
     renameTake: (songId: string, takeId: string, name: string) => Promise<void>

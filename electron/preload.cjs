@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
   loadSongFile: (songId) => ipcRenderer.invoke('load-song-file', songId),
   updateSong: (songId, fields) => ipcRenderer.invoke('update-song', { songId, fields }),
-  saveVideoTake: (buffer, songId) => ipcRenderer.invoke('save-video-take', { buffer, songId }),
+  saveVideoTake: (buffer, songId, speed) => ipcRenderer.invoke('save-video-take', { buffer, songId, speed }),
   getTakesForSong: (songId) => ipcRenderer.invoke('get-takes-for-song', songId),
   deleteTake: (songId, takeId) => ipcRenderer.invoke('delete-take', { songId, takeId }),
   renameTake: (songId, takeId, name) => ipcRenderer.invoke('rename-take', { songId, takeId, name }),

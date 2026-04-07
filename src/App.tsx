@@ -8,6 +8,14 @@ import { fetchAlbumArt } from './iTunesApi'
 
 type AppState = 'idle' | 'countdown' | 'recording' | 'playing'
 
+/** Format an ISO date string into a short readable form (e.g. "Apr 7, 2026 · 3:44 PM") */
+function formatDate(iso: string): string {
+  const d = new Date(iso)
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    + ' \u00b7 '
+    + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+}
+
 /** Convert a local file path to a take-video:// URL for Electron playback */
 function takeVideoUrl(filePath: string): string {
   // Normalize backslashes to forward slashes and encode
@@ -291,7 +299,7 @@ function App() {
         try {
           const blob = new Blob(chunksRef.current, { type: 'video/webm' })
           const arrayBuffer = await blob.arrayBuffer()
-          const result = await window.electronAPI!.saveVideoTake(arrayBuffer, songId)
+          const result = await window.electronAPI!.saveVideoTake(arrayBuffer, songId, Math.round(playbackSpeed * 100))
           if (result.success) {
             console.log('Take saved:', result.path, result.take)
             if (result.take) {
@@ -309,7 +317,7 @@ function App() {
     }
     alphaTabApiRef.current?.play()
     setAppState('recording')
-  }, [songId])
+  }, [songId, playbackSpeed])
 
   const startCountdown = useCallback(() => {
     if (!countInEnabled) {
@@ -695,7 +703,7 @@ function App() {
             {takes.length === 0 && (
               <p className="text-zinc-600 text-xs text-center py-4">No takes yet</p>
             )}
-            {takes.map((take, index) => (
+            {takes.map((take) => (
               <div
                 key={take.id}
                 onClick={() => setTheaterTake(take)}
@@ -712,8 +720,8 @@ function App() {
                 </div>
                 {/* Take info */}
                 <div className="flex-1 min-w-0">
-                  <p className="text-zinc-300 text-xs font-medium truncate">{take.name || `Take #${index + 1}`}</p>
-                  <p className="text-zinc-500 text-[10px] font-mono">{take.date}</p>
+                  <p className="text-zinc-300 text-xs font-medium truncate">{take.name || `Take #${take.takeNumber}`}</p>
+                  <p className="text-zinc-500 text-[10px] font-mono">{formatDate(take.createdAt)}</p>
                   <p className="text-zinc-600 text-[10px] font-mono">{take.speed}% Speed</p>
                 </div>
                 {/* Star rating */}
@@ -759,9 +767,9 @@ function App() {
           {/* Take info header */}
           <div className="absolute top-5 left-5 z-10">
             <p className="text-zinc-300 text-sm font-medium">
-              {theaterTake.name || `Take #${takes.findIndex(t => t.id === theaterTake.id) + 1}`}
+              {theaterTake.name || `Take #${theaterTake.takeNumber}`}
             </p>
-            <p className="text-zinc-500 text-xs font-mono">{theaterTake.date} &middot; {theaterTake.speed}% Speed</p>
+            <p className="text-zinc-500 text-xs font-mono">{formatDate(theaterTake.createdAt)} &middot; {theaterTake.speed}% Speed</p>
           </div>
 
           {/* Video player — 70% width, 16:9 */}
@@ -789,7 +797,7 @@ function App() {
       {toastTake && (
         <TakeToast
           key={toastTake.id}
-          defaultName={`Take #${takes.length}`}
+          defaultName={`Take #${toastTake.takeNumber}`}
           onRename={(newName) => {
             window.electronAPI?.renameTake(songId, toastTake.id, newName)
             setTakes(prev => prev.map(t => t.id === toastTake.id ? { ...t, name: newName } : t))

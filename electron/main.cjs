@@ -404,7 +404,7 @@ function setupIPC() {
   });
 
   // Save a recorded video take
-  ipcMain.handle('save-video-take', async (_event, { buffer, songId }) => {
+  ipcMain.handle('save-video-take', async (_event, { buffer, songId, speed }) => {
     try {
       const song = getSong(songId);
       if (!song) return { success: false };
@@ -412,28 +412,20 @@ function setupIPC() {
       const takesDir = song.paths.takesFolder;
       fs.mkdirSync(takesDir, { recursive: true });
 
+      const takeNumber = song.nextTakeNumber;
+      song.nextTakeNumber = takeNumber + 1;
+
       const timestamp = Date.now();
-      const safeName = sanitizeFolderName(song.title || 'take');
-      const kebabName = safeName
-        .toLowerCase()
-        .replace(/\s+/g, '-')
-        .replace(/[^a-z0-9-]/g, '')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '');
-      const filename = `${kebabName || 'take'}-${timestamp}.webm`;
+      const filename = `take-${takeNumber}-${timestamp}.webm`;
       const filePath = path.join(takesDir, filename);
 
       const data = Buffer.from(new Uint8Array(buffer));
       fs.writeFileSync(filePath, data);
 
-      const takeNumber = song.nextTakeNumber;
-      song.nextTakeNumber = takeNumber + 1;
-
       const take = {
         id: `take_${timestamp}`,
         takeNumber,
-        date: new Date(timestamp).toLocaleString(),
-        speed: 100,
+        speed: speed ?? 100,
         filePath,
         createdAt: new Date(timestamp).toISOString(),
       };
