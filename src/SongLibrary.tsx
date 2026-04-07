@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react'
 import SongCard from './SongCard'
 
 interface SongLibraryProps {
-  onSongSelect: (song: SongObject) => void
+  onSongSelect: (song: Song) => void
   onFileOpen: () => void
+  onTestTab?: () => void
   refreshKey: number
 }
 
-export default function SongLibrary({ onSongSelect, onFileOpen, refreshKey }: SongLibraryProps) {
-  const [songs, setSongs] = useState<SongObject[]>([])
+export default function SongLibrary({ onSongSelect, onFileOpen, onTestTab, refreshKey }: SongLibraryProps) {
+  const [songs, setSongs] = useState<Song[]>([])
 
   useEffect(() => {
     window.electronAPI?.getAllSongs().then(setSongs)
@@ -63,6 +64,22 @@ export default function SongLibrary({ onSongSelect, onFileOpen, refreshKey }: So
           </div>
         </button>
       </div>
+
+      {/* Test Tab Button (dev only) */}
+      {onTestTab && (
+        <div className="flex justify-center pb-6">
+          <button onClick={onTestTab} className="cursor-pointer group">
+            <div className="flex items-center gap-2">
+              <svg viewBox="0 0 24 24" className="w-4 h-4 text-zinc-600 group-hover:text-amber-accent transition-colors" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18" />
+              </svg>
+              <span className="text-zinc-500 text-xs font-medium group-hover:text-zinc-300 transition-colors">
+                Use Test Tab
+              </span>
+            </div>
+          </button>
+        </div>
+      )}
     </div>
   )
 }

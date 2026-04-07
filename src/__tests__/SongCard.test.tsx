@@ -2,15 +2,25 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import SongCard from '../SongCard'
 
-function makeSong(overrides: Partial<SongObject> = {}): SongObject {
+function makeSong(overrides: Partial<Song> = {}): Song {
   return {
     id: 'test-id-123',
     title: 'Master of Puppets',
     artist: 'Metallica',
     bpm: 212,
-    nextTakeNumber: 1,
+    tuning: '',
+    nextTakeNumber: 6,
     paths: { tabFile: '/path/to/file.gp', takesFolder: '/path/to/takes' },
-    stats: { totalTakes: 5 },
+    takes: Array.from({ length: 5 }, (_, i) => ({
+      id: `take_${i}`,
+      takeNumber: i + 1,
+      date: '1/1/2026',
+      speed: 100,
+      filePath: `/path/to/takes/take-${i}.webm`,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    })),
+    lastOpened: Date.now(),
+    createdAt: '2026-01-01T00:00:00.000Z',
     ...overrides,
   }
 }

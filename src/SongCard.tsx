@@ -18,12 +18,12 @@ function getGradient(id: string): string {
 }
 
 interface SongCardProps {
-  song: SongObject
+  song: Song
   onClick: () => void
 }
 
 export default function SongCard({ song, onClick }: SongCardProps) {
-  const takesCount = song.stats?.totalTakes ?? 0
+  const takesCount = song.takes?.length ?? 0
   const tuning = song.tuning || 'E Std'
 
   return (

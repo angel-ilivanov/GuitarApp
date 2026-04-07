@@ -113,13 +113,14 @@ function App() {
   const [countInEnabled, setCountInEnabled] = useState(true)
   const [cameraError, setCameraError] = useState<string | false>(false)
   const [scoreLoaded, setScoreLoaded] = useState(false)
-  const [songFilename, setSongFilename] = useState('')
-  const [recentSongs, setRecentSongs] = useState<RecentSong[]>([])
+  const [songId, setSongId] = useState('')
   const [takes, setTakes] = useState<Take[]>([])
   const [songTitle, setSongTitle] = useState('')
   const [songArtist, setSongArtist] = useState('')
   const [bpm, setBpm] = useState(0)
   const [timeSig, setTimeSig] = useState('')
+  const [playbackSpeed, setPlaybackSpeed] = useState(1)
+  const [masterVolume, setMasterVolume] = useState(1)
 
   // Library refresh trigger
   const [libraryRefreshKey, setLibraryRefreshKey] = useState(0)
@@ -160,14 +161,9 @@ function App() {
     }
   }, [])
 
-  // Fetch recent songs on mount
-  useEffect(() => {
-    window.electronAPI?.getRecentSongs().then(setRecentSongs)
-  }, [])
-
-  const loadTakes = useCallback((filename: string) => {
-    if (filename) {
-      window.electronAPI?.getTakesForSong(filename).then(setTakes)
+  const loadTakes = useCallback((id: string) => {
+    if (id) {
+      window.electronAPI?.getTakesForSong(id).then(setTakes)
     }
   }, [])
 
@@ -185,27 +181,28 @@ function App() {
 
   const handleApiReady = useCallback((api: alphaTab.AlphaTabApi) => {
     alphaTabApiRef.current = api
-  }, [])
+    api.playbackSpeed = playbackSpeed
+    api.masterVolume = masterVolume
+  }, [playbackSpeed, masterVolume])
 
-  const handleFileOpened = useCallback((fileName: string, filePath: string, title: string, artist: string) => {
-    setSongFilename(fileName)
+  const handleFileOpened = useCallback((id: string, title: string, artist: string) => {
+    setSongId(id)
     setSongTitle(title)
     setSongArtist(artist)
-    window.electronAPI?.updateSongMeta(fileName, title, artist)
-    window.electronAPI?.getRecentSongs().then(setRecentSongs)
-    loadTakes(fileName)
+    window.electronAPI?.updateSong(id, { title, artist })
+    loadTakes(id)
     setTimeout(() => {
       extractScoreInfo()
-      // Register the song in the library with BPM from the parsed score
       const scoreBpm = alphaTabApiRef.current?.score?.tempo ?? 0
-      window.electronAPI?.addNewSong(filePath, title, artist, scoreBpm).then(async (songObj) => {
-        console.log('Song added to library:', songObj)
+      window.electronAPI?.updateSong(id, { bpm: scoreBpm }).then(async () => {
         setLibraryRefreshKey(k => k + 1)
         // Fetch album art from iTunes if not already set
-        if (!songObj.albumArt && (title || artist)) {
+        const songs = await window.electronAPI?.getAllSongs()
+        const song = songs?.find(s => s.id === id)
+        if (!song?.albumArt && (title || artist)) {
           const artUrl = await fetchAlbumArt(title, artist)
           if (artUrl) {
-            await window.electronAPI?.updateSongAlbumArt(songObj.id, artUrl)
+            await window.electronAPI?.updateSong(id, { albumArt: artUrl })
             setLibraryRefreshKey(k => k + 1)
           }
         }
@@ -213,11 +210,8 @@ function App() {
     }, 100)
   }, [loadTakes, extractScoreInfo])
 
-  const handleLoadFromLibrary = useCallback(async (song: SongObject) => {
-    const filePath = song.paths?.tabFile
-    if (!filePath) return
-    const songFilename = filePath.split(/[/\\]/).pop() || ''
-    const result = await window.electronAPI!.loadRecentFile(filePath, songFilename)
+  const handleLoadFromLibrary = useCallback(async (song: Song) => {
+    const result = await window.electronAPI!.loadSongFile(song.id)
     if (result.error === 'file_not_found') {
       alert('File no longer exists at the saved location.')
       return
@@ -226,53 +220,49 @@ function App() {
       alert('Failed to read file.')
       return
     }
-    setSongFilename(songFilename)
-    const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), songFilename)
+    setSongId(song.id)
+    const fileName = result.fileName || 'untitled.gp'
+    const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), fileName)
     if (meta) {
       setSongTitle(meta.title)
       setSongArtist(meta.artist)
-      window.electronAPI?.updateSongMeta(songFilename, meta.title, meta.artist)
+      window.electronAPI?.updateSong(song.id, { title: meta.title, artist: meta.artist })
     }
-    window.electronAPI?.getRecentSongs().then(setRecentSongs)
-    loadTakes(songFilename)
+    loadTakes(song.id)
     setTimeout(extractScoreInfo, 100)
   }, [loadTakes, extractScoreInfo])
 
+  const handleTestTab = useCallback(async () => {
+    try {
+      const res = await fetch('/test-tab.gp')
+      const buf = await res.arrayBuffer()
+      const fileName = 'test-tab.gp'
+      const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(buf), fileName)
+      const title = meta?.title || ''
+      const artist = meta?.artist || ''
+      // Test tab doesn't persist to the store — just load it locally
+      setSongId('')
+      setSongTitle(title)
+      setSongArtist(artist)
+      setTakes([])
+      setTimeout(extractScoreInfo, 100)
+    } catch (err) {
+      console.error('Failed to load test tab:', err)
+    }
+  }, [extractScoreInfo])
+
   const handleLibraryFileOpen = useCallback(() => {
-    tabRendererRef.current // trigger file open via TabRenderer's openFile
-    // We need to trigger the file dialog. We can call openFileDialog directly.
     const doOpen = async () => {
       const result = await window.electronAPI!.openFileDialog()
       if (result.cancelled) return
-      const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), result.fileName!)
+      const fileName = result.filePath ? result.filePath.split(/[/\\]/).pop()! : 'untitled.gp'
+      const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), fileName)
       const title = meta?.title || ''
       const artist = meta?.artist || ''
-      handleFileOpened(result.fileName!, result.filePath!, title, artist)
+      handleFileOpened(result.songId!, title, artist)
     }
     doOpen()
   }, [handleFileOpened])
-
-  const handleLoadRecent = useCallback(async (song: RecentSong) => {
-    const result = await window.electronAPI!.loadRecentFile(song.gpFilePath, song.songFilename)
-    if (result.error === 'file_not_found') {
-      alert('File no longer exists at the saved location.')
-      return
-    }
-    if (result.error) {
-      alert('Failed to read file.')
-      return
-    }
-    setSongFilename(song.songFilename)
-    const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), song.songFilename)
-    if (meta) {
-      setSongTitle(meta.title)
-      setSongArtist(meta.artist)
-      window.electronAPI?.updateSongMeta(song.songFilename, meta.title, meta.artist)
-    }
-    window.electronAPI?.getRecentSongs().then(setRecentSongs)
-    loadTakes(song.songFilename)
-    setTimeout(extractScoreInfo, 100)
-  }, [loadTakes, extractScoreInfo])
 
   const playTick = useCallback((isFirst: boolean) => {
     const ctx = new AudioContext()
@@ -301,12 +291,11 @@ function App() {
         try {
           const blob = new Blob(chunksRef.current, { type: 'video/webm' })
           const arrayBuffer = await blob.arrayBuffer()
-          const buffer = new Uint8Array(arrayBuffer)
-          const result = await window.electronAPI!.saveVideoTake(buffer, songFilename, songTitle)
+          const result = await window.electronAPI!.saveVideoTake(arrayBuffer, songId)
           if (result.success) {
             console.log('Take saved:', result.path, result.take)
             if (result.take) {
-              const freshTakes = await window.electronAPI!.getTakesForSong(songFilename)
+              const freshTakes = await window.electronAPI!.getTakesForSong(songId)
               setTakes(freshTakes)
               setToastTake(result.take)
             }
@@ -320,7 +309,7 @@ function App() {
     }
     alphaTabApiRef.current?.play()
     setAppState('recording')
-  }, [songFilename, songTitle])
+  }, [songId])
 
   const startCountdown = useCallback(() => {
     if (!countInEnabled) {
@@ -335,6 +324,7 @@ function App() {
     const beats = score?.masterBars?.[0]?.timeSignatureNumerator ?? 4
     const msPerBeat = 60000 / scoreBpm
 
+    alphaTabApiRef.current?.pause()
     setAppState('countdown')
     setCountdown(beats)
     playTick(true)
@@ -377,6 +367,18 @@ function App() {
     }
   }, [metronomeOn])
 
+  useEffect(() => {
+    if (alphaTabApiRef.current) {
+      alphaTabApiRef.current.playbackSpeed = playbackSpeed
+    }
+  }, [playbackSpeed])
+
+  useEffect(() => {
+    if (alphaTabApiRef.current) {
+      alphaTabApiRef.current.masterVolume = masterVolume
+    }
+  }, [masterVolume])
+
   // Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -389,13 +391,13 @@ function App() {
       if ((e.key === 'r' || e.key === 'R' || e.key === 'р' || e.key === 'Р') && !e.ctrlKey && !e.metaKey) {
         if (appState === 'recording') {
           stopRecording()
-        } else if (appState === 'idle' && scoreLoaded && !cameraError) {
+        } else if ((appState === 'idle' || appState === 'playing') && scoreLoaded && !cameraError) {
           startCountdown()
         }
       }
       if ((e.key === ' ' || e.key === 'k' || e.key === 'K' || e.key === 'к' || e.key === 'К') && !e.ctrlKey && !e.metaKey) {
         e.preventDefault()
-        if (scoreLoaded && (appState === 'idle' || appState === 'playing')) {
+        if (scoreLoaded && appState !== 'countdown') {
           togglePlay()
         }
       }
@@ -418,6 +420,7 @@ function App() {
     alphaTabApiRef.current?.stop()
     setAppState('idle')
     setScoreLoaded(false)
+    setSongId('')
     setSongTitle('')
     setSongArtist('')
     setBpm(0)
@@ -443,7 +446,7 @@ function App() {
           <div className="shrink-0 px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
             <div>
               <h1 className="text-zinc-100 text-sm font-semibold tracking-wide uppercase">
-                {songArtist && <>{songArtist} — </>}"{songTitle || songFilename}"
+                {songArtist && <>{songArtist} — </>}"{songTitle || 'Untitled'}"
               </h1>
               <div className="flex items-center gap-4 mt-0.5">
                 <span className="text-zinc-500 text-[11px] font-mono uppercase tracking-wider">
@@ -456,7 +459,7 @@ function App() {
             </div>
             <button
               onClick={togglePlay}
-              disabled={!scoreLoaded || appState === 'countdown' || appState === 'recording'}
+              disabled={!scoreLoaded || appState === 'countdown'}
               className={`w-10 h-10 rounded-full flex items-center justify-center border transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                 appState === 'playing'
                   ? 'bg-amber-accent/20 border-amber-accent/60 text-amber-accent'
@@ -497,6 +500,7 @@ function App() {
               <SongLibrary
                 onSongSelect={handleLoadFromLibrary}
                 onFileOpen={handleLibraryFileOpen}
+                onTestTab={handleTestTab}
                 refreshKey={libraryRefreshKey}
               />
             </div>
@@ -555,27 +559,95 @@ function App() {
         <div className="shrink-0 px-3 pt-4">
           <span className="text-[10px] font-semibold tracking-widest uppercase text-zinc-500 block mb-3">Control Deck</span>
 
-          {/* Pill Dropdowns */}
-          <div className="flex flex-col gap-2 mb-4">
-            <select className="pill-select bg-zinc-800/80 text-zinc-300 text-xs border border-zinc-700 rounded-full px-4 py-2 focus:outline-none focus:border-amber-accent/50 cursor-pointer">
-              <option>Sound Preset: CLEAN LEAD</option>
-              <option>Sound Preset: OVERDRIVE</option>
-              <option>Sound Preset: DISTORTION</option>
-              <option>Sound Preset: ACOUSTIC</option>
-            </select>
+          {/* Tuner + Sliders */}
+          <div className="flex flex-col gap-3 mb-4">
             <select className="pill-select bg-zinc-800/80 text-zinc-300 text-xs border border-zinc-700 rounded-full px-4 py-2 focus:outline-none focus:border-amber-accent/50 cursor-pointer">
               <option>Tuner: E STANDARD</option>
               <option>Tuner: DROP D</option>
               <option>Tuner: D STANDARD</option>
               <option>Tuner: OPEN G</option>
             </select>
-            <select className="pill-select bg-zinc-800/80 text-zinc-300 text-xs border border-zinc-700 rounded-full px-4 py-2 focus:outline-none focus:border-amber-accent/50 cursor-pointer">
-              <option>Tempo: {bpm || 120} BPM</option>
-            </select>
+
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">speed</span>
+                <span className="text-[10px] font-semibold tracking-widest text-amber-accent">{Math.round(playbackSpeed * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={Math.round(playbackSpeed * 100)}
+                onChange={(e) => setPlaybackSpeed(Number(e.target.value) / 100)}
+                className="amber-slider w-full"
+                style={{ background: `linear-gradient(90deg, #E09800 0%, #FFB703 ${playbackSpeed * 50}%, #FFCA40 ${playbackSpeed * 100}%, #2a2a2a ${playbackSpeed * 100}%)` }}
+              />
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">volume</span>
+                <span className="text-[10px] font-semibold tracking-widest text-amber-accent">{Math.round(masterVolume * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={Math.round(masterVolume * 100)}
+                onChange={(e) => setMasterVolume(Number(e.target.value) / 100)}
+                className="amber-slider w-full"
+                style={{ background: `linear-gradient(90deg, #E09800 0%, #FFB703 ${masterVolume * 50}%, #FFCA40 ${masterVolume * 100}%, #2a2a2a ${masterVolume * 100}%)` }}
+              />
+            </div>
           </div>
 
           {/* Record + Playback Controls */}
           <div className="flex items-center justify-center gap-3">
+            {/* Record Button — Pill */}
+            {appState === 'recording' ? (
+              <button
+                onClick={stopRecording}
+                className="h-11 px-5 rounded-full bg-charcoal border-2 border-red-500/80 flex items-center gap-2 transition-all hover:border-red-400 active:scale-95"
+                aria-label="Stop recording"
+              >
+                <div className="w-3.5 h-3.5 rounded-sm bg-red-500" />
+                <span className="text-red-500 text-xs font-bold tracking-wider">RECORD</span>
+              </button>
+            ) : (
+              <button
+                onClick={startCountdown}
+                disabled={appState === 'countdown' || !!cameraError || !scoreLoaded}
+                className="h-11 px-5 rounded-full bg-amber-accent/10 border-2 border-amber-accent flex items-center gap-2 transition-all hover:bg-amber-accent/20 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed animate-glowAmber"
+                aria-label="Start recording"
+              >
+                <div className="w-3 h-3 rounded-full bg-amber-accent" />
+                <span className="text-amber-accent text-xs font-bold tracking-wider">RECORD</span>
+              </button>
+            )}
+
+            {/* Play / Pause */}
+            <button
+              onClick={togglePlay}
+              disabled={!scoreLoaded || appState === 'countdown'}
+              className={`w-9 h-9 rounded-full flex items-center justify-center border transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
+                appState === 'playing'
+                  ? 'bg-amber-accent/20 border-amber-accent/50 text-amber-accent'
+                  : 'bg-zinc-800 border-zinc-700 text-zinc-500 hover:border-zinc-600'
+              }`}
+              aria-label={appState === 'playing' ? 'Stop playback' : 'Play tab'}
+            >
+              {appState === 'playing' ? (
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
+                  <rect x="6" y="5" width="4" height="14" rx="1" />
+                  <rect x="14" y="5" width="4" height="14" rx="1" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
+                  <path d="M8 5.14v14.72a1 1 0 001.5.86l11-7.36a1 1 0 000-1.72l-11-7.36A1 1 0 008 5.14z" />
+                </svg>
+              )}
+            </button>
+
             {/* Metronome Toggle */}
             <button
               onClick={toggleMetronome}
@@ -609,49 +681,6 @@ function App() {
                 <path d="M12 6v6l4 2" />
                 <circle cx="12" cy="12" r="10" />
               </svg>
-            </button>
-
-            {/* Record Button */}
-            {appState === 'recording' ? (
-              <button
-                onClick={stopRecording}
-                className="w-14 h-14 rounded-full bg-charcoal border-2 border-red-500/80 flex items-center justify-center transition-all hover:border-red-400 active:scale-95"
-                aria-label="Stop recording"
-              >
-                <div className="w-5 h-5 rounded-sm bg-red-500" />
-              </button>
-            ) : (
-              <button
-                onClick={startCountdown}
-                disabled={appState === 'countdown' || appState === 'playing' || !!cameraError || !scoreLoaded}
-                className="w-14 h-14 rounded-full bg-amber-accent/10 border-2 border-amber-accent flex items-center justify-center transition-all hover:bg-amber-accent/20 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed animate-glowAmber"
-                aria-label="Start recording"
-              >
-                <span className="text-amber-accent text-[10px] font-bold tracking-wider">REC</span>
-              </button>
-            )}
-
-            {/* Play / Pause */}
-            <button
-              onClick={togglePlay}
-              disabled={!scoreLoaded || appState === 'countdown' || appState === 'recording'}
-              className={`w-9 h-9 rounded-full flex items-center justify-center border transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
-                appState === 'playing'
-                  ? 'bg-amber-accent/20 border-amber-accent/50 text-amber-accent'
-                  : 'bg-zinc-800 border-zinc-700 text-zinc-500 hover:border-zinc-600'
-              }`}
-              aria-label={appState === 'playing' ? 'Stop playback' : 'Play tab'}
-            >
-              {appState === 'playing' ? (
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
-                  <rect x="6" y="5" width="4" height="14" rx="1" />
-                  <rect x="14" y="5" width="4" height="14" rx="1" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
-                  <path d="M8 5.14v14.72a1 1 0 001.5.86l11-7.36a1 1 0 000-1.72l-11-7.36A1 1 0 008 5.14z" />
-                </svg>
-              )}
             </button>
           </div>
         </div>
@@ -692,7 +721,7 @@ function App() {
                   onClick={(e) => {
                     e.stopPropagation()
                     const newRating = take.rating ? 0 : 1
-                    window.electronAPI?.updateTakeRating(songFilename, take.id, newRating)
+                    window.electronAPI?.updateTakeRating(songId, take.id, newRating)
                     setTakes(prev => prev.map(t => t.id === take.id ? { ...t, rating: newRating } : t))
                   }}
                   className="shrink-0 transition-all hover:scale-110"
@@ -762,15 +791,15 @@ function App() {
           key={toastTake.id}
           defaultName={`Take #${takes.length}`}
           onRename={(newName) => {
-            window.electronAPI?.renameTake(songFilename, toastTake.id, newName)
+            window.electronAPI?.renameTake(songId, toastTake.id, newName)
             setTakes(prev => prev.map(t => t.id === toastTake.id ? { ...t, name: newName } : t))
           }}
           onRate={(score) => {
-            window.electronAPI?.updateTakeRating(songFilename, toastTake.id, score)
+            window.electronAPI?.updateTakeRating(songId, toastTake.id, score)
             setTakes(prev => prev.map(t => t.id === toastTake.id ? { ...t, rating: score } : t))
           }}
           onDelete={() => {
-            window.electronAPI?.deleteTake(songFilename, toastTake.id)
+            window.electronAPI?.deleteTake(songId, toastTake.id)
             setTakes(prev => prev.filter(t => t.id !== toastTake.id))
             setToastTake(null)
           }}

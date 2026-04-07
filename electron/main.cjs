@@ -8,9 +8,85 @@ const store = new Store({
   name: 'takes-vault',
   schema: {
     songs: { type: 'object', default: {} },
-    library: { type: 'array', default: [] }
+    _schemaVersion: { type: 'number', default: 0 }
   }
 });
+
+// ── Data migration ─────────────────────────────────────────
+// Migrate from the old dual-store (songs-by-filename + library array)
+// to a single songs-by-UUID store.
+function migrateToV1() {
+  if (store.get('_schemaVersion', 0) >= 1) return;
+
+  const oldSongs = store.get('songs', {});       // keyed by GP filename
+  const oldLibrary = store.get('library', []);    // array of SongObjects
+  const unified = {};
+
+  // Index old song entries by basename for matching
+  const oldSongsByBasename = {};
+  for (const [filename, entry] of Object.entries(oldSongs)) {
+    oldSongsByBasename[filename] = entry;
+  }
+
+  const matchedFilenames = new Set();
+
+  // Merge library entries with their matching song entries
+  for (const lib of oldLibrary) {
+    const basename = lib.paths?.tabFile ? path.basename(lib.paths.tabFile) : '';
+    const oldEntry = oldSongsByBasename[basename];
+    if (oldEntry) matchedFilenames.add(basename);
+
+    unified[lib.id] = {
+      id: lib.id,
+      title: lib.title || oldEntry?.title || '',
+      artist: lib.artist || oldEntry?.artist || '',
+      bpm: lib.bpm || oldEntry?.bpm || 0,
+      tuning: lib.tuning || '',
+      albumArt: lib.albumArt || undefined,
+      paths: {
+        tabFile: lib.paths?.tabFile || oldEntry?.gpFilePath || '',
+        takesFolder: lib.paths?.takesFolder || '',
+      },
+      takes: oldEntry?.takes || [],
+      nextTakeNumber: oldEntry?.nextTakeNumber ?? (oldEntry?.takes?.length || 0) + 1,
+      lastOpened: oldEntry?.lastOpened || Date.now(),
+      createdAt: oldEntry?.takes?.[0]?.createdAt || new Date().toISOString(),
+    };
+  }
+
+  // Handle orphaned song entries (takes with no library entry)
+  for (const [filename, entry] of Object.entries(oldSongs)) {
+    if (matchedFilenames.has(filename)) continue;
+    if (!entry.takes?.length && !entry.gpFilePath) continue; // skip empty entries
+
+    const id = crypto.randomUUID();
+    const title = entry.title || path.basename(filename, path.extname(filename));
+    const safeName = sanitizeFolderName(title);
+
+    unified[id] = {
+      id,
+      title,
+      artist: entry.artist || '',
+      bpm: entry.bpm || 0,
+      tuning: '',
+      paths: {
+        tabFile: entry.gpFilePath || '',
+        takesFolder: path.join(app.getPath('videos'), 'GuitarApp Takes', safeName),
+      },
+      takes: entry.takes || [],
+      nextTakeNumber: entry.nextTakeNumber ?? (entry.takes?.length || 0) + 1,
+      lastOpened: entry.lastOpened || Date.now(),
+      createdAt: entry.takes?.[0]?.createdAt || new Date().toISOString(),
+    };
+  }
+
+  store.set('songs', unified);
+  store.delete('library');
+  store.set('_schemaVersion', 1);
+  console.log(`Migration complete: ${Object.keys(unified).length} songs unified`);
+}
+
+// ── Helpers ────────────────────────────────────────────────
 
 /** Sanitize a string for use as an OS folder name */
 function sanitizeFolderName(name) {
@@ -21,20 +97,17 @@ function sanitizeFolderName(name) {
     .slice(0, 100) || 'Unknown';
 }
 
-function getSongEntry(songFilename) {
-  const songs = store.get('songs', {});
-  const entry = songs[songFilename] || { takes: [], nextTakeNumber: 1 };
-  // Backfill nextTakeNumber for entries created before this field existed
-  if (entry.nextTakeNumber == null) {
-    entry.nextTakeNumber = (entry.takes?.length || 0) + 1;
-  }
-  return entry;
+function getSong(songId) {
+  return store.get(`songs.${songId}`, null);
 }
 
-function setSongEntry(songFilename, entry) {
+function setSong(songId, song) {
+  store.set(`songs.${songId}`, song);
+}
+
+function findSongByTabFile(filePath) {
   const songs = store.get('songs', {});
-  songs[songFilename] = entry;
-  store.set('songs', songs);
+  return Object.values(songs).find(s => s.paths?.tabFile === filePath) || null;
 }
 
 // Bypass Chromium's permission UI for media streams entirely
@@ -149,7 +222,6 @@ function setupMediaPermissions() {
 function setupTakeVideoProtocol() {
   protocol.handle('take-video', (request) => {
     // URL format: take-video://file/<encoded-absolute-path>
-    // Parse the raw URL string to avoid new URL() mangling custom schemes
     const prefix = 'take-video://file/';
     const rawUrl = request.url;
     if (!rawUrl.startsWith(prefix)) {
@@ -180,14 +252,19 @@ function setupTakeVideoProtocol() {
       };
 
       if (rangeHeader) {
-        // Support range requests for video seeking
         const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
         const start = parseInt(match[1], 10);
         const end = match[2] ? parseInt(match[2], 10) : stat.size - 1;
         const chunkSize = end - start + 1;
 
-        const stream = fs.createReadStream(normalizedPath, { start, end });
-        return new Response(stream, {
+        // Use a buffer slice instead of a stream — Electron's protocol.handle
+        // can throw ERR_INVALID_STATE when a Node ReadableStream closes.
+        const fd = fs.openSync(normalizedPath, 'r');
+        const chunk = Buffer.alloc(chunkSize);
+        fs.readSync(fd, chunk, 0, chunkSize, start);
+        fs.closeSync(fd);
+
+        return new Response(chunk, {
           status: 206,
           headers: {
             ...corsHeaders,
@@ -219,7 +296,6 @@ function setupProtocolHandler() {
     const url = new URL(request.url);
     let pathname = decodeURIComponent(url.pathname);
 
-    // Default to index.html for root
     if (pathname === '/' || pathname === '') {
       pathname = '/index.html';
     }
@@ -227,7 +303,6 @@ function setupProtocolHandler() {
     const distPath = getDistPath();
     const filePath = path.join(distPath, pathname);
 
-    // Security: prevent path traversal
     const normalizedPath = path.normalize(filePath);
     if (!normalizedPath.startsWith(path.normalize(distPath))) {
       return new Response('Forbidden', { status: 403 });
@@ -247,7 +322,11 @@ function setupProtocolHandler() {
   });
 }
 
+// ── IPC Handlers ───────────────────────────────────────────
+
 function setupIPC() {
+
+  // Open a GP file — creates or finds an existing song, returns buffer + songId
   ipcMain.handle('open-file-dialog', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(BrowserWindow.getFocusedWindow(), {
       title: 'Open Guitar Pro File',
@@ -260,62 +339,81 @@ function setupIPC() {
     }
 
     const filePath = filePaths[0];
-    const fileName = path.basename(filePath);
     const fileBuffer = fs.readFileSync(filePath);
 
-    const entry = getSongEntry(fileName);
-    entry.gpFilePath = filePath;
-    entry.lastOpened = Date.now();
-    setSongEntry(fileName, entry);
+    // Find existing song by tab file path
+    const existing = findSongByTabFile(filePath);
+    if (existing) {
+      existing.lastOpened = Date.now();
+      setSong(existing.id, existing);
+      return { cancelled: false, buffer: new Uint8Array(fileBuffer), songId: existing.id, filePath };
+    }
 
-    return { cancelled: false, buffer: new Uint8Array(fileBuffer), fileName, filePath };
+    // Create new song
+    const id = crypto.randomUUID();
+    const fileName = path.basename(filePath, path.extname(filePath));
+    const safeName = sanitizeFolderName(fileName);
+    const takesFolder = path.join(app.getPath('videos'), 'GuitarApp Takes', safeName);
+    fs.mkdirSync(takesFolder, { recursive: true });
+
+    const song = {
+      id,
+      title: '',
+      artist: '',
+      bpm: 0,
+      tuning: '',
+      paths: { tabFile: filePath, takesFolder },
+      takes: [],
+      nextTakeNumber: 1,
+      lastOpened: Date.now(),
+      createdAt: new Date().toISOString(),
+    };
+
+    setSong(id, song);
+    return { cancelled: false, buffer: new Uint8Array(fileBuffer), songId: id, filePath };
   });
 
-  ipcMain.handle('get-recent-songs', () => {
-    const songs = store.get('songs', {});
-    return Object.entries(songs)
-      .filter(([, entry]) => entry.gpFilePath)
-      .sort(([, a], [, b]) => (b.lastOpened || 0) - (a.lastOpened || 0))
-      .slice(0, 10)
-      .map(([songFilename, entry]) => ({
-        songFilename,
-        gpFilePath: entry.gpFilePath,
-        lastOpened: entry.lastOpened,
-        takesCount: (entry.takes || []).length,
-        title: entry.title || '',
-        artist: entry.artist || '',
-      }));
-  });
+  // Load a song's GP file by songId
+  ipcMain.handle('load-song-file', (_event, songId) => {
+    const song = getSong(songId);
+    if (!song) return { error: 'not_found' };
 
-  ipcMain.handle('load-recent-file', (_event, { filePath, songFilename }) => {
     try {
-      const fileBuffer = fs.readFileSync(filePath);
-      const entry = getSongEntry(songFilename);
-      entry.lastOpened = Date.now();
-      setSongEntry(songFilename, entry);
-      return { buffer: new Uint8Array(fileBuffer), fileName: songFilename };
+      const fileBuffer = fs.readFileSync(song.paths.tabFile);
+      song.lastOpened = Date.now();
+      setSong(songId, song);
+      return { buffer: new Uint8Array(fileBuffer), fileName: path.basename(song.paths.tabFile) };
     } catch (err) {
-      if (err.code === 'ENOENT') {
-        return { error: 'file_not_found' };
-      }
+      if (err.code === 'ENOENT') return { error: 'file_not_found' };
       return { error: 'read_failed' };
     }
   });
 
-  ipcMain.handle('update-song-meta', (_event, { songFilename, title, artist }) => {
-    const entry = getSongEntry(songFilename);
-    entry.title = title;
-    entry.artist = artist;
-    setSongEntry(songFilename, entry);
+  // Partial-update song metadata
+  ipcMain.handle('update-song', (_event, { songId, fields }) => {
+    const song = getSong(songId);
+    if (!song) return;
+
+    const allowed = ['title', 'artist', 'bpm', 'tuning', 'albumArt'];
+    for (const key of allowed) {
+      if (fields[key] !== undefined) {
+        song[key] = fields[key];
+      }
+    }
+    setSong(songId, song);
   });
 
-  ipcMain.handle('save-video-take', async (_event, { buffer, songFilename, songName }) => {
+  // Save a recorded video take
+  ipcMain.handle('save-video-take', async (_event, { buffer, songId }) => {
     try {
-      const safeName = sanitizeFolderName(songName || songFilename);
-      const takesDir = path.join(app.getPath('videos'), 'GuitarApp Takes', safeName);
+      const song = getSong(songId);
+      if (!song) return { success: false };
+
+      const takesDir = song.paths.takesFolder;
       fs.mkdirSync(takesDir, { recursive: true });
+
       const timestamp = Date.now();
-      // Kebab-case filename: lowercase, hyphens for spaces, no special chars
+      const safeName = sanitizeFolderName(song.title || 'take');
       const kebabName = safeName
         .toLowerCase()
         .replace(/\s+/g, '-')
@@ -324,13 +422,12 @@ function setupIPC() {
         .replace(/^-|-$/g, '');
       const filename = `${kebabName || 'take'}-${timestamp}.webm`;
       const filePath = path.join(takesDir, filename);
-      // Copy into a fresh Buffer to avoid IPC stream-backed buffer issues
+
       const data = Buffer.from(new Uint8Array(buffer));
       fs.writeFileSync(filePath, data);
 
-      const entry = getSongEntry(songFilename);
-      const takeNumber = entry.nextTakeNumber;
-      entry.nextTakeNumber = takeNumber + 1;
+      const takeNumber = song.nextTakeNumber;
+      song.nextTakeNumber = takeNumber + 1;
 
       const take = {
         id: `take_${timestamp}`,
@@ -341,9 +438,9 @@ function setupIPC() {
         createdAt: new Date(timestamp).toISOString(),
       };
 
-      entry.takes.push(take);
-      entry.lastOpened = Date.now();
-      setSongEntry(songFilename, entry);
+      song.takes.push(take);
+      song.lastOpened = Date.now();
+      setSong(songId, song);
 
       return { success: true, path: filePath, take };
     } catch {
@@ -351,118 +448,79 @@ function setupIPC() {
     }
   });
 
-  ipcMain.handle('get-takes-for-song', (_event, songFilename) => {
-    const entry = getSongEntry(songFilename);
-    const validTakes = entry.takes.filter(take => fs.existsSync(take.filePath));
+  // Get takes for a song (validates files still exist on disk)
+  ipcMain.handle('get-takes-for-song', (_event, songId) => {
+    const song = getSong(songId);
+    if (!song) return [];
 
-    // Clean up ghost records if any files were missing
-    if (validTakes.length !== entry.takes.length) {
-      entry.takes = validTakes;
-      // Reset counter to 1 if all takes have been deleted
+    const validTakes = song.takes.filter(take => fs.existsSync(take.filePath));
+
+    if (validTakes.length !== song.takes.length) {
+      song.takes = validTakes;
       if (validTakes.length === 0) {
-        entry.nextTakeNumber = 1;
+        song.nextTakeNumber = 1;
       }
-      setSongEntry(songFilename, entry);
+      setSong(songId, song);
     }
 
     return validTakes;
   });
 
-  ipcMain.handle('delete-take', (_event, { songFilename, takeId }) => {
-    const entry = getSongEntry(songFilename);
-    const take = entry.takes.find(t => t.id === takeId);
+  // Delete a take
+  ipcMain.handle('delete-take', (_event, { songId, takeId }) => {
+    const song = getSong(songId);
+    if (!song) return { success: false };
+
+    const take = song.takes.find(t => t.id === takeId);
     if (take) {
       try { fs.unlinkSync(take.filePath); } catch {}
-      entry.takes = entry.takes.filter(t => t.id !== takeId);
-      if (entry.takes.length === 0) {
-        entry.nextTakeNumber = 1;
+      song.takes = song.takes.filter(t => t.id !== takeId);
+      if (song.takes.length === 0) {
+        song.nextTakeNumber = 1;
       }
-      setSongEntry(songFilename, entry);
+      setSong(songId, song);
     }
     return { success: true };
   });
 
-  ipcMain.handle('rename-take', (_event, { songFilename, takeId, name }) => {
-    const entry = getSongEntry(songFilename);
-    const take = entry.takes.find(t => t.id === takeId);
+  // Rename a take
+  ipcMain.handle('rename-take', (_event, { songId, takeId, name }) => {
+    const song = getSong(songId);
+    if (!song) return;
+
+    const take = song.takes.find(t => t.id === takeId);
     if (take) {
       take.name = name;
-      setSongEntry(songFilename, entry);
+      setSong(songId, song);
     }
   });
 
-  ipcMain.handle('update-take-rating', (_event, { songFilename, takeId, rating }) => {
-    const entry = getSongEntry(songFilename);
-    const take = entry.takes.find(t => t.id === takeId);
+  // Update take rating
+  ipcMain.handle('update-take-rating', (_event, { songId, takeId, rating }) => {
+    const song = getSong(songId);
+    if (!song) return;
+
+    const take = song.takes.find(t => t.id === takeId);
     if (take) {
       take.rating = rating;
-      setSongEntry(songFilename, entry);
+      setSong(songId, song);
     }
   });
 
-  // ── Library handlers ──────────────────────────────────────
-
-  ipcMain.handle('add-new-song', (_event, { filePath, title, artist, bpm }) => {
-    const library = store.get('library', []);
-
-    // Avoid duplicates — match by tab file path
-    const existing = library.find(s => s.paths && s.paths.tabFile === filePath);
-    if (existing) {
-      // Update metadata in case it changed
-      existing.title = title || existing.title;
-      existing.artist = artist || existing.artist;
-      existing.bpm = bpm || existing.bpm;
-      store.set('library', library);
-      return existing;
-    }
-
-    const id = crypto.randomUUID();
-    const safeName = sanitizeFolderName(title || path.basename(filePath, path.extname(filePath)));
-    const takesFolder = path.join(app.getPath('videos'), 'GuitarApp Takes', safeName);
-
-    // Pre-create the empty takes folder on disk
-    fs.mkdirSync(takesFolder, { recursive: true });
-
-    const songObject = {
-      id,
-      title: title || '',
-      artist: artist || '',
-      bpm: bpm || 0,
-      nextTakeNumber: 1,
-      paths: {
-        tabFile: filePath,
-        takesFolder,
-      },
-      stats: {
-        totalTakes: 0,
-      },
-    };
-
-    library.push(songObject);
-    store.set('library', library);
-
-    return songObject;
-  });
-
+  // Get all songs
   ipcMain.handle('get-all-songs', () => {
-    return store.get('library', []);
+    return Object.values(store.get('songs', {}));
   });
 
+  // Clear entire library
   ipcMain.handle('clear-library', () => {
-    store.set('library', []);
-  });
-
-  ipcMain.handle('update-song-album-art', (_event, { songId, albumArt }) => {
-    const library = store.get('library', []);
-    const song = library.find(s => s.id === songId);
-    if (song) {
-      song.albumArt = albumArt;
-      store.set('library', library);
-    }
+    store.set('songs', {});
   });
 }
 
 app.whenReady().then(() => {
+  migrateToV1();
+
   if (!isDev) {
     setupProtocolHandler();
   }

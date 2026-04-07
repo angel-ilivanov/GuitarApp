@@ -8,20 +8,45 @@ interface TrackInfo {
 
 // MIDI programs 24-31 are guitar instruments
 const GUITAR_MIDI_PROGRAMS = new Set([24, 25, 26, 27, 28, 29, 30, 31])
-const GUITAR_NAME_PATTERNS = /guitar|lead|gtr|rhythm|acoustic|electric|dist\./i
+
+// Patterns that strongly indicate a guitar track (most specific first)
+const GUITAR_STRONG_PATTERNS = /\bguitar\b|\bgtr\b|\bguit\b/i
+
+// Patterns that indicate guitar when combined with context
+const GUITAR_CONTEXTUAL_PATTERNS = /\blead gtr\b|\blead guitar\b|\brhythm\b|\bacoustic\b|\belectric\b|\bdist(ortion|\.)\b|\boverdriv/i
+
+// Common guitarist names found in Guitar Pro files
+const KNOWN_GUITARISTS = /\bslash\b|\bfrusciante\b|\bhendrix\b|\bclapton\b|\bgilmour\b|\bpage\b|\bmorello\b|\bhammet/i
+
+// Tracks to explicitly exclude even if they partially match
+const NOT_GUITAR = /\bvocal\b|\bvox\b|\bbass\b|\bdrum\b|\bkey\b|\bpiano\b|\borgan\b|\bsynth\b|\bstring\b|\bsax\b|\btrump/i
 
 function findGuitarTrack(tracks: alphaTab.model.Track[]): number {
-  // 1. Try matching by track name
-  const byName = tracks.find((t) => GUITAR_NAME_PATTERNS.test(t.name))
-  if (byName) return byName.index
+  // 1. Strong name match (contains "guitar", "gtr", "guit")
+  const byStrongName = tracks.find((t) =>
+    GUITAR_STRONG_PATTERNS.test(t.name) && !NOT_GUITAR.test(t.name)
+  )
+  if (byStrongName) return byStrongName.index
 
-  // 2. Try matching by MIDI program (guitar patches 24-31)
+  // 2. Contextual name match (lead guitar, rhythm, acoustic, distortion, etc.)
+  const byContext = tracks.find((t) =>
+    GUITAR_CONTEXTUAL_PATTERNS.test(t.name) && !NOT_GUITAR.test(t.name)
+  )
+  if (byContext) return byContext.index
+
+  // 3. Known guitarist names
+  const byGuitarist = tracks.find((t) =>
+    KNOWN_GUITARISTS.test(t.name) && !NOT_GUITAR.test(t.name)
+  )
+  if (byGuitarist) return byGuitarist.index
+
+  // 4. MIDI program match (guitar patches 24-31)
   const byProgram = tracks.find((t) =>
     GUITAR_MIDI_PROGRAMS.has(t.playbackInfo.program)
   )
   if (byProgram) return byProgram.index
 
-  // 3. Fallback to first track
+  // 5. Fallback to first track
   return 0
 }
 
@@ -32,7 +57,7 @@ export interface TabRendererHandle {
 interface TabRendererProps {
   onApiReady?: (api: alphaTab.AlphaTabApi) => void
   onScoreLoaded?: () => void
-  onFileOpened?: (fileName: string, filePath: string, title: string, artist: string) => void
+  onFileOpened?: (songId: string, title: string, artist: string) => void
   onSongClosed?: () => void
 }
 
@@ -55,6 +80,7 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
     settings.display.layoutMode = alphaTab.LayoutMode.Page
     settings.display.staveProfile = alphaTab.StaveProfile.Tab
     settings.display.scale = 1.0
+    settings.display.padding = [20, 50, 20, 20]  // top, right, bottom, left
     settings.core.logLevel = alphaTab.LogLevel.Warning
     settings.core.fontDirectory = '/font/'
     settings.core.enableLazyLoading = false
@@ -69,16 +95,26 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
     settings.display.resources.barNumberColor = new alphaTab.model.Color(255, 183, 3, 255)        // amber accent
     settings.display.resources.scoreInfoColor = new alphaTab.model.Color(203, 213, 225, 255)      // slate-300
 
-    // Typography — Inter sans-serif, bold tab numbers
-    settings.display.resources.tablatureFont = new alphaTab.model.Font('Inter', 13, alphaTab.model.FontStyle.Bold)
-    settings.display.resources.graceFont = new alphaTab.model.Font('Inter', 9, alphaTab.model.FontStyle.Plain)
-    settings.display.resources.barNumberFont = new alphaTab.model.Font('Inter', 10, alphaTab.model.FontStyle.Bold)
-    settings.display.resources.titleFont = new alphaTab.model.Font('Inter', 28, alphaTab.model.FontStyle.Bold)
-    settings.display.resources.subTitleFont = new alphaTab.model.Font('Inter', 18, alphaTab.model.FontStyle.Plain)
-    settings.display.resources.wordsFont = new alphaTab.model.Font('Inter', 13, alphaTab.model.FontStyle.Plain)
-    settings.display.resources.effectFont = new alphaTab.model.Font('Inter', 11, alphaTab.model.FontStyle.Plain)
-    settings.display.resources.copyrightFont = new alphaTab.model.Font('Inter', 11, alphaTab.model.FontStyle.Plain)
-    settings.display.resources.markerFont = new alphaTab.model.Font('Inter', 12, alphaTab.model.FontStyle.Bold)
+    // Typography
+    // Tab numbers — bold and crisp
+    settings.display.resources.tablatureFont = new alphaTab.model.Font('Inter', 13, alphaTab.model.FontStyle.Plain, alphaTab.model.FontWeight.Bold)
+    settings.display.resources.graceFont = new alphaTab.model.Font('Inter', 9, alphaTab.model.FontStyle.Italic)
+    settings.display.resources.barNumberFont = new alphaTab.model.Font('Inter', 10, alphaTab.model.FontStyle.Plain, alphaTab.model.FontWeight.Bold)
+
+    // Score info — elegant serif for title/subtitle
+    settings.display.resources.titleFont = new alphaTab.model.Font('Georgia', 28, alphaTab.model.FontStyle.Italic)
+    settings.display.resources.subTitleFont = new alphaTab.model.Font('Georgia', 16, alphaTab.model.FontStyle.Italic)
+    settings.display.resources.wordsFont = new alphaTab.model.Font('Georgia', 12, alphaTab.model.FontStyle.Italic)
+    settings.display.resources.copyrightFont = new alphaTab.model.Font('Inter', 10, alphaTab.model.FontStyle.Italic)
+
+    // Effects & markers — matching serif style
+    settings.display.resources.effectFont = new alphaTab.model.Font('Georgia', 10, alphaTab.model.FontStyle.Italic)
+    settings.display.resources.markerFont = new alphaTab.model.Font('Georgia', 12, alphaTab.model.FontStyle.Italic)
+
+    // Hide elements that clip or clutter the tab-only view
+    settings.notation.elements.set(alphaTab.NotationElement.EffectLyrics, false)
+    settings.notation.elements.set(alphaTab.NotationElement.EffectText, false)
+    settings.notation.elements.set(alphaTab.NotationElement.EffectFingering, false)
 
     // Rhythm stems — simplified geometric bars
     settings.notation.rhythmMode = alphaTab.TabRhythmMode.ShowWithBars
@@ -139,8 +175,9 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
   const openFile = useCallback(async () => {
     const result = await window.electronAPI!.openFileDialog()
     if (result.cancelled) return
-    const meta = loadFromBuffer(new Uint8Array(result.buffer!), result.fileName!)
-    onFileOpened?.(result.fileName!, result.filePath!, meta?.title || '', meta?.artist || '')
+    const fileName = result.filePath ? result.filePath.split(/[/\\]/).pop()! : 'untitled.gp'
+    const meta = loadFromBuffer(new Uint8Array(result.buffer!), fileName)
+    onFileOpened?.(result.songId!, meta?.title || '', meta?.artist || '')
   }, [loadFromBuffer, onFileOpened])
 
   const resetToHome = useCallback(() => {
@@ -223,12 +260,12 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
       {/* Scroll wrapper — AlphaTab scrolls this */}
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto overflow-x-hidden min-h-0"
+        className="flex-1 overflow-y-auto overflow-x-auto min-h-0"
       >
         {/* AlphaTab render container — notation renders here */}
         <div
           ref={containerRef}
-          className="relative p-4"
+          className="relative px-2 py-4"
         />
       </div>
     </div>
