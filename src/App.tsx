@@ -9,6 +9,7 @@ import TheaterActionBar from './TheaterActionBar'
 import { fetchAlbumArt } from './iTunesApi'
 
 type AppState = 'idle' | 'countdown' | 'recording' | 'playing'
+type SongMetadata = { title: string; artist: string; bpm: number }
 
 /** Format an ISO date string into a short readable form (e.g. "Apr 7, 2026 · 3:44 PM") */
 function formatDate(iso: string): string {
@@ -23,6 +24,22 @@ function takeVideoUrl(filePath: string): string {
   // Normalize backslashes to forward slashes and encode
   const normalized = filePath.replace(/\\/g, '/')
   return `take-video://file/${encodeURIComponent(normalized)}`
+}
+
+function extractSongMetadata(data: Uint8Array): SongMetadata | null {
+  try {
+    const settings = new alphaTab.Settings()
+    const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(data, settings)
+
+    return {
+      title: score.title || '',
+      artist: score.artist || '',
+      bpm: score.tempo ?? 0,
+    }
+  } catch (err) {
+    console.error('Failed to extract song metadata:', err)
+    return null
+  }
 }
 
 /** Generates a thumbnail data URL from a .webm video by seeking to 0.5s */
@@ -131,6 +148,7 @@ function App() {
   const [timeSig, setTimeSig] = useState('')
   const [playbackSpeed, setPlaybackSpeed] = useState(1)
   const [masterVolume, setMasterVolume] = useState(1)
+  const [isPlaybackActive, setIsPlaybackActive] = useState(false)
 
   // Library refresh trigger
   const [libraryRefreshKey, setLibraryRefreshKey] = useState(0)
@@ -190,36 +208,47 @@ function App() {
     }
   }, [])
 
+  const persistSongMetadata = useCallback(async (id: string, metadata: SongMetadata) => {
+    await window.electronAPI?.updateSong(id, metadata)
+    setLibraryRefreshKey(k => k + 1)
+
+    const songs = await window.electronAPI?.getAllSongs()
+    const song = songs?.find(s => s.id === id)
+
+    if (!song?.albumArt && (metadata.title || metadata.artist)) {
+      const artUrl = await fetchAlbumArt(metadata.title, metadata.artist)
+      if (artUrl) {
+        await window.electronAPI?.updateSong(id, { albumArt: artUrl })
+        setLibraryRefreshKey(k => k + 1)
+      }
+    }
+  }, [])
+
   const handleApiReady = useCallback((api: alphaTab.AlphaTabApi) => {
     alphaTabApiRef.current = api
     api.playbackSpeed = playbackSpeed
     api.masterVolume = masterVolume
+    setIsPlaybackActive(api.playerState === alphaTab.synth.PlayerState.Playing)
+    api.playerStateChanged.on((args) => {
+      const playing = args.state === alphaTab.synth.PlayerState.Playing
+      setIsPlaybackActive(playing)
+      if (!playing) {
+        setAppState((current) => current === 'playing' ? 'idle' : current)
+      }
+    })
   }, [playbackSpeed, masterVolume])
 
   const handleFileOpened = useCallback((id: string, title: string, artist: string) => {
     setSongId(id)
     setSongTitle(title)
     setSongArtist(artist)
-    window.electronAPI?.updateSong(id, { title, artist })
     loadTakes(id)
     setTimeout(() => {
       extractScoreInfo()
       const scoreBpm = alphaTabApiRef.current?.score?.tempo ?? 0
-      window.electronAPI?.updateSong(id, { bpm: scoreBpm }).then(async () => {
-        setLibraryRefreshKey(k => k + 1)
-        // Fetch album art from iTunes if not already set
-        const songs = await window.electronAPI?.getAllSongs()
-        const song = songs?.find(s => s.id === id)
-        if (!song?.albumArt && (title || artist)) {
-          const artUrl = await fetchAlbumArt(title, artist)
-          if (artUrl) {
-            await window.electronAPI?.updateSong(id, { albumArt: artUrl })
-            setLibraryRefreshKey(k => k + 1)
-          }
-        }
-      })
+      void persistSongMetadata(id, { title, artist, bpm: scoreBpm })
     }, 100)
-  }, [loadTakes, extractScoreInfo])
+  }, [loadTakes, extractScoreInfo, persistSongMetadata])
 
   const handleLoadFromLibrary = useCallback(async (song: Song) => {
     const result = await window.electronAPI!.loadSongFile(song.id)
@@ -237,11 +266,18 @@ function App() {
     if (meta) {
       setSongTitle(meta.title)
       setSongArtist(meta.artist)
-      window.electronAPI?.updateSong(song.id, { title: meta.title, artist: meta.artist })
     }
     loadTakes(song.id)
-    setTimeout(extractScoreInfo, 100)
-  }, [loadTakes, extractScoreInfo])
+    setTimeout(() => {
+      extractScoreInfo()
+      const scoreBpm = alphaTabApiRef.current?.score?.tempo ?? 0
+      void persistSongMetadata(song.id, {
+        title: meta?.title ?? song.title,
+        artist: meta?.artist ?? song.artist,
+        bpm: scoreBpm,
+      })
+    }, 100)
+  }, [loadTakes, extractScoreInfo, persistSongMetadata])
 
   const handleTestTab = useCallback(async () => {
     try {
@@ -262,18 +298,18 @@ function App() {
     }
   }, [extractScoreInfo])
 
-  const handleLibraryFileOpen = useCallback(() => {
-    const doOpen = async () => {
-      const result = await window.electronAPI!.openFileDialog()
-      if (result.cancelled) return
-      const fileName = result.filePath ? result.filePath.split(/[/\\]/).pop()! : 'untitled.gp'
-      const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), fileName)
-      const title = meta?.title || ''
-      const artist = meta?.artist || ''
-      handleFileOpened(result.songId!, title, artist)
+  const handleLibraryFileOpen = useCallback(async () => {
+    const result = await window.electronAPI!.openFileDialog()
+    if (result.cancelled || !result.songId || !result.buffer) return
+
+    const metadata = extractSongMetadata(new Uint8Array(result.buffer))
+    if (metadata) {
+      await persistSongMetadata(result.songId, metadata)
+      return
     }
-    doOpen()
-  }, [handleFileOpened])
+
+    setLibraryRefreshKey(k => k + 1)
+  }, [persistSongMetadata])
 
   const playTick = useCallback((isFirst: boolean) => {
     const ctx = new AudioContext()
@@ -319,6 +355,7 @@ function App() {
       recorder.start()
     }
     alphaTabApiRef.current?.play()
+    setIsPlaybackActive(true)
     setAppState('recording')
   }, [songId, playbackSpeed])
 
@@ -336,6 +373,7 @@ function App() {
     const msPerBeat = 60000 / scoreBpm
 
     alphaTabApiRef.current?.pause()
+    setIsPlaybackActive(false)
     setAppState('countdown')
     setCountdown(beats)
     playTick(true)
@@ -357,15 +395,27 @@ function App() {
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop()
     alphaTabApiRef.current?.stop()
+    setIsPlaybackActive(false)
     setAppState('idle')
   }, [])
 
   const togglePlay = useCallback(() => {
-    if (appState === 'playing') {
-      alphaTabApiRef.current?.pause()
-      setAppState('idle')
-    } else {
-      alphaTabApiRef.current?.play()
+    const api = alphaTabApiRef.current
+    if (!api) return
+
+    const playing = api.playerState === alphaTab.synth.PlayerState.Playing
+    if (playing) {
+      api.pause()
+      setIsPlaybackActive(false)
+      if (appState === 'playing') {
+        setAppState('idle')
+      }
+      return
+    }
+
+    api.play()
+    setIsPlaybackActive(true)
+    if (appState !== 'recording') {
       setAppState('playing')
     }
   }, [appState])
@@ -429,6 +479,7 @@ function App() {
   const handleSongClosed = useCallback(() => {
     recorderRef.current?.stop()
     alphaTabApiRef.current?.stop()
+    setIsPlaybackActive(false)
     setAppState('idle')
     setScoreLoaded(false)
     setSongId('')
@@ -505,13 +556,13 @@ function App() {
               onClick={togglePlay}
               disabled={!scoreLoaded || appState === 'countdown'}
               className={`w-10 h-10 rounded-full flex items-center justify-center border transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
-                appState === 'playing'
+                isPlaybackActive
                   ? 'bg-amber-accent/20 border-amber-accent/60 text-amber-accent'
                   : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-600'
               }`}
-              aria-label={appState === 'playing' ? 'Pause playback' : 'Play tab'}
+              aria-label={isPlaybackActive ? 'Pause playback' : 'Play tab'}
             >
-              {appState === 'playing' ? (
+              {isPlaybackActive ? (
                 <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
                   <rect x="6" y="5" width="4" height="14" rx="1" />
                   <rect x="14" y="5" width="4" height="14" rx="1" />
@@ -674,13 +725,13 @@ function App() {
               onClick={togglePlay}
               disabled={!scoreLoaded || appState === 'countdown'}
               className={`w-9 h-9 rounded-full flex items-center justify-center border transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
-                appState === 'playing'
+                isPlaybackActive
                   ? 'bg-amber-accent/20 border-amber-accent/50 text-amber-accent'
                   : 'bg-zinc-800 border-zinc-700 text-zinc-500 hover:border-zinc-600'
               }`}
-              aria-label={appState === 'playing' ? 'Stop playback' : 'Play tab'}
+              aria-label={isPlaybackActive ? 'Pause playback' : 'Play tab'}
             >
-              {appState === 'playing' ? (
+              {isPlaybackActive ? (
                 <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
                   <rect x="6" y="5" width="4" height="14" rx="1" />
                   <rect x="14" y="5" width="4" height="14" rx="1" />
@@ -739,7 +790,7 @@ function App() {
             {takes.length === 0 && (
               <p className="text-zinc-600 text-xs text-center py-4">No takes yet</p>
             )}
-            {takes.map((take) => (
+            {[...takes].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).map((take) => (
               <div
                 key={take.id}
                 onClick={() => setTheaterTake(take)}

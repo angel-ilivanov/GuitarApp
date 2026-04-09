@@ -16,7 +16,7 @@ export default function TheaterActionBar({ take, onRate, onDelete, onShowInFolde
       {/* Show in Folder */}
       <button
         onClick={onShowInFolder}
-        className="flex items-center gap-1.5 text-zinc-400 hover:text-zinc-200 transition-colors"
+        className="flex items-center gap-1.5 text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
         aria-label="Show in folder"
       >
         <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
