@@ -1,35 +1,23 @@
-const GRADIENTS = [
-  'linear-gradient(135deg, #dc2626 0%, #7f1d1d 100%)',
-  'linear-gradient(135deg, #2563eb 0%, #1e3a5f 100%)',
-  'linear-gradient(135deg, #0d9488 0%, #134e4a 100%)',
-  'linear-gradient(135deg, #16a34a 0%, #14532d 100%)',
-  'linear-gradient(135deg, #d97706 0%, #78350f 100%)',
-  'linear-gradient(135deg, #7c3aed 0%, #3b0764 100%)',
-  'linear-gradient(135deg, #0ea5e9 0%, #0c4a6e 100%)',
-  'linear-gradient(135deg, #e11d48 0%, #4c0519 100%)',
-]
-
-function getGradient(id: string): string {
-  let hash = 0
-  for (let i = 0; i < id.length; i++) {
-    hash = id.charCodeAt(i) + ((hash << 5) - hash)
-  }
-  return GRADIENTS[Math.abs(hash) % GRADIENTS.length]
-}
+import { getSongArtworkBackground } from './songArtwork'
 
 interface SongCardProps {
   song: Song
   onClick: () => void
+  active?: boolean
 }
 
-export default function SongCard({ song, onClick }: SongCardProps) {
+export default function SongCard({ song, onClick, active = false }: SongCardProps) {
   const takesCount = song.takes?.length ?? 0
   const tuning = song.tuning || 'E Std'
 
   return (
     <button
       onClick={onClick}
-      className="flex items-stretch gap-0 rounded-xl bg-[#252525] border border-zinc-800 hover:border-amber-accent/40 transition-all cursor-pointer group text-left overflow-hidden w-full"
+      className={`group flex w-full cursor-pointer items-stretch gap-0 overflow-hidden rounded-xl border bg-[#252525] text-left transition-all duration-150 ease-in-out ${
+        active
+          ? 'border-amber-accent/60 shadow-[0_0_0_1px_rgba(255,183,3,0.16)]'
+          : 'border-zinc-800 hover:border-amber-accent/40'
+      }`}
     >
       {/* Album Art */}
       <div className="w-[88px] h-[88px] shrink-0">
@@ -43,7 +31,7 @@ export default function SongCard({ song, onClick }: SongCardProps) {
         ) : (
           <div
             className="w-full h-full"
-            style={{ background: getGradient(song.id) }}
+            style={{ background: getSongArtworkBackground(song.id) }}
           />
         )}
       </div>

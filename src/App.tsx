@@ -1,29 +1,22 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Plyr from 'plyr'
 import * as alphaTab from '@coderline/alphatab'
 import TabRenderer from './TabRenderer'
 import type { TabRendererHandle } from './TabRenderer'
 import TakeToast from './TakeToast'
-import SongLibrary from './SongLibrary'
-import TheaterActionBar from './TheaterActionBar'
+import LeftWorkspace from './LeftWorkspace'
+import SidebarPanel from './SidebarPanel'
+import TheaterOverlay from './TheaterOverlay'
 import { fetchAlbumArt } from './iTunesApi'
+import type { LeftView, LibraryFilter, SidebarMode } from './librarySelectors'
+import { getTakeDisplayName } from './takeUtils'
 
 type AppState = 'idle' | 'countdown' | 'recording' | 'playing'
 type SongMetadata = { title: string; artist: string; bpm: number }
 
-/** Format an ISO date string into a short readable form (e.g. "Apr 7, 2026 · 3:44 PM") */
-function formatDate(iso: string): string {
-  const d = new Date(iso)
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-    + ' \u00b7 '
-    + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-}
-
-/** Convert a local file path to a take-video:// URL for Electron playback */
-function takeVideoUrl(filePath: string): string {
-  // Normalize backslashes to forward slashes and encode
-  const normalized = filePath.replace(/\\/g, '/')
-  return `take-video://file/${encodeURIComponent(normalized)}`
+interface TakeSelection {
+  songId: string
+  takeId: string
 }
 
 function extractSongMetadata(data: Uint8Array): SongMetadata | null {
@@ -42,90 +35,6 @@ function extractSongMetadata(data: Uint8Array): SongMetadata | null {
   }
 }
 
-/** Generates a thumbnail data URL from a .webm video by seeking to 0.5s */
-function generateThumbnail(filePath: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video')
-    video.crossOrigin = 'anonymous'
-    video.muted = true
-    video.preload = 'auto'
-    video.src = takeVideoUrl(filePath)
-
-    video.addEventListener('loadeddata', () => {
-      // Seek to 0.5s to avoid a black first frame
-      video.currentTime = Math.min(0.5, video.duration || 0.5)
-    })
-
-    video.addEventListener('seeked', () => {
-      try {
-        const canvas = document.createElement('canvas')
-        canvas.width = 160
-        canvas.height = 90
-        const ctx = canvas.getContext('2d')!
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.7)
-        resolve(dataUrl)
-      } catch {
-        reject(new Error('Failed to draw thumbnail'))
-      } finally {
-        video.src = ''
-        video.load()
-      }
-    })
-
-    video.addEventListener('error', () => {
-      reject(new Error('Failed to load video for thumbnail'))
-    })
-
-    // Timeout fallback
-    setTimeout(() => reject(new Error('Thumbnail generation timeout')), 5000)
-  })
-}
-
-/** Small component that lazily generates and displays a video thumbnail */
-function TakeThumbnail({ filePath, onFileMissing }: { filePath: string; onFileMissing?: () => void }) {
-  const [thumb, setThumb] = useState<string | null>(null)
-  const [failed, setFailed] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    generateThumbnail(filePath)
-      .then((url) => { if (!cancelled) setThumb(url) })
-      .catch(() => {
-        if (!cancelled) {
-          console.warn('Thumbnail failed — file may be missing:', filePath)
-          setFailed(true)
-          onFileMissing?.()
-        }
-      })
-    return () => { cancelled = true }
-  }, [filePath, onFileMissing])
-
-  if (failed) {
-    return (
-      <div className="w-10 h-10 rounded bg-red-950/40 border border-red-900/50 flex items-center justify-center" title="File missing">
-        <svg viewBox="0 0 24 24" className="w-4 h-4 text-red-500/70" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
-        </svg>
-      </div>
-    )
-  }
-
-  if (thumb) {
-    return <img src={thumb} alt="Take thumbnail" className="w-10 h-10 rounded object-cover" />
-  }
-
-  // Fallback icon while loading
-  return (
-    <div className="w-10 h-10 rounded bg-zinc-900 border border-zinc-700 flex items-center justify-center">
-      <svg viewBox="0 0 24 24" className="w-4 h-4 text-zinc-600" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <rect x="2" y="4" width="20" height="16" rx="2" />
-        <path d="M10 9l5 3-5 3V9z" fill="currentColor" stroke="none" />
-      </svg>
-    </div>
-  )
-}
-
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -133,15 +42,21 @@ function App() {
   const chunksRef = useRef<Blob[]>([])
   const alphaTabApiRef = useRef<alphaTab.AlphaTabApi | null>(null)
   const tabRendererRef = useRef<TabRendererHandle>(null)
+  const reviewVideoRef = useRef<HTMLVideoElement>(null)
+  const theaterVideoRef = useRef<HTMLVideoElement>(null)
+  const plyrRef = useRef<Plyr | null>(null)
 
+  const [songs, setSongs] = useState<Song[]>([])
+  const [leftView, setLeftView] = useState<LeftView>('play')
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>('recording')
+  const [activeLibraryFilter, setActiveLibraryFilter] = useState<LibraryFilter>('none')
   const [appState, setAppState] = useState<AppState>('idle')
-  const [countdown, setCountdown] = useState<number>(0)
+  const [countdown, setCountdown] = useState(0)
   const [metronomeOn, setMetronomeOn] = useState(false)
   const [countInEnabled, setCountInEnabled] = useState(true)
   const [cameraError, setCameraError] = useState<string | false>(false)
   const [scoreLoaded, setScoreLoaded] = useState(false)
-  const [songId, setSongId] = useState('')
-  const [takes, setTakes] = useState<Take[]>([])
+  const [activeSongId, setActiveSongId] = useState('')
   const [songTitle, setSongTitle] = useState('')
   const [songArtist, setSongArtist] = useState('')
   const [bpm, setBpm] = useState(0)
@@ -149,19 +64,98 @@ function App() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1)
   const [masterVolume, setMasterVolume] = useState(1)
   const [isPlaybackActive, setIsPlaybackActive] = useState(false)
-
-  // Library refresh trigger
-  const [libraryRefreshKey, setLibraryRefreshKey] = useState(0)
-
-  // Toast notification state
+  const [reviewSelection, setReviewSelection] = useState<TakeSelection | null>(null)
+  const [theaterSelection, setTheaterSelection] = useState<TakeSelection | null>(null)
   const [toastTake, setToastTake] = useState<Take | null>(null)
+  const [reviewIsPlaying, setReviewIsPlaying] = useState(false)
+  const [reviewCurrentTime, setReviewCurrentTime] = useState(0)
+  const [reviewDuration, setReviewDuration] = useState(0)
 
-  // Theater Mode state
-  const [theaterTake, setTheaterTake] = useState<Take | null>(null)
-  const theaterVideoRef = useRef<HTMLVideoElement>(null)
-  const plyrRef = useRef<Plyr | null>(null)
+  const activeSong = useMemo(() => songs.find((song) => song.id === activeSongId) ?? null, [songs, activeSongId])
+  const reviewSong = useMemo(() => songs.find((song) => song.id === reviewSelection?.songId) ?? null, [songs, reviewSelection])
+  const reviewTake = useMemo(() => reviewSong?.takes.find((take) => take.id === reviewSelection?.takeId) ?? null, [reviewSong, reviewSelection])
+  const theaterSong = useMemo(() => songs.find((song) => song.id === theaterSelection?.songId) ?? null, [songs, theaterSelection])
+  const theaterTake = useMemo(() => theaterSong?.takes.find((take) => take.id === theaterSelection?.takeId) ?? null, [theaterSong, theaterSelection])
+  const reviewTakeFilePath = reviewTake?.filePath ?? null
+  const theaterTakeFilePath = theaterTake?.filePath ?? null
+  const effectiveSidebarMode: SidebarMode = sidebarMode === 'reviewing' && reviewTake ? 'reviewing' : 'recording'
+  const effectiveReviewSelection = reviewTake ? reviewSelection : null
+  const reviewMediaKey = effectiveReviewSelection && reviewTakeFilePath
+    ? `${effectiveReviewSelection.songId}:${effectiveReviewSelection.takeId}:${reviewTakeFilePath}`
+    : null
+  const theaterMediaKey = theaterSelection && theaterTakeFilePath
+    ? `${theaterSelection.songId}:${theaterSelection.takeId}:${theaterTakeFilePath}`
+    : null
+  const sidebarSong = effectiveSidebarMode === 'reviewing' ? reviewSong : activeSong
+  const sidebarTakes = useMemo(
+    () => [...(sidebarSong?.takes ?? [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [sidebarSong],
+  )
 
-  // Start camera on mount
+  const refreshSongs = useCallback(async (): Promise<Song[]> => {
+    const nextSongs = await window.electronAPI?.getAllSongs() ?? []
+    setSongs(nextSongs)
+    return nextSongs
+  }, [])
+
+  const updateSongTakes = useCallback((songId: string, updater: (takes: Take[]) => Take[]) => {
+    setSongs((current) => current.map((song) => (
+      song.id === songId
+        ? { ...song, takes: updater(song.takes ?? []) }
+        : song
+    )))
+  }, [])
+
+  const refreshSongTakes = useCallback(async (songId: string) => {
+    if (!songId) return []
+    const nextTakes = await window.electronAPI?.getTakesForSong(songId) ?? []
+    updateSongTakes(songId, () => nextTakes)
+    return nextTakes
+  }, [updateSongTakes])
+
+  const resetReviewPlaybackState = useCallback(() => {
+    setReviewCurrentTime(0)
+    setReviewDuration(0)
+    setReviewIsPlaying(false)
+  }, [])
+
+  const exitReviewMode = useCallback(() => {
+    resetReviewPlaybackState()
+    setSidebarMode('recording')
+    setReviewSelection(null)
+  }, [resetReviewPlaybackState])
+
+  const persistSongMetadata = useCallback(async (songId: string, metadata: SongMetadata) => {
+    await window.electronAPI?.updateSong(songId, metadata)
+    const nextSongs = await refreshSongs()
+    const song = nextSongs.find((entry) => entry.id === songId)
+    if (!song?.albumArt && (metadata.title || metadata.artist)) {
+      const artUrl = await fetchAlbumArt(metadata.title, metadata.artist)
+      if (artUrl) {
+        await window.electronAPI?.updateSong(songId, { albumArt: artUrl })
+        await refreshSongs()
+      }
+    }
+  }, [refreshSongs])
+
+  const extractScoreInfo = useCallback(() => {
+    const score = alphaTabApiRef.current?.score
+    if (!score) return
+    setBpm(score.tempo)
+    const masterBar = score.masterBars?.[0]
+    if (masterBar) {
+      setTimeSig(`${masterBar.timeSignatureNumerator}/${masterBar.timeSignatureDenominator}`)
+    }
+  }, [])
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void refreshSongs()
+    }, 0)
+
+    return () => window.clearTimeout(timeout)
+  }, [refreshSongs])
+
   useEffect(() => {
     async function initCamera() {
       try {
@@ -179,50 +173,85 @@ function App() {
           videoRef.current.srcObject = stream
         }
       } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err))
-        console.error('getUserMedia failed:', e)
-        setCameraError(`${e.name}: ${e.message}`)
+        const error = err instanceof Error ? err : new Error(String(err))
+        console.error('getUserMedia failed:', error)
+        setCameraError(`${error.name}: ${error.message}`)
       }
     }
-    initCamera()
+
+    void initCamera()
+
     return () => {
-      streamRef.current?.getTracks().forEach((t) => t.stop())
+      streamRef.current?.getTracks().forEach((track) => track.stop())
     }
   }, [])
 
-  const loadTakes = useCallback((id: string) => {
-    if (id) {
-      window.electronAPI?.getTakesForSong(id).then(setTakes)
+  useEffect(() => {
+    if (sidebarMode === 'recording' && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current
     }
-  }, [])
+  }, [sidebarMode])
 
-  const extractScoreInfo = useCallback(() => {
-    const api = alphaTabApiRef.current
-    const score = api?.score
-    if (score) {
-      setBpm(score.tempo)
-      const mb = score.masterBars?.[0]
-      if (mb) {
-        setTimeSig(`${mb.timeSignatureNumerator}/${mb.timeSignatureDenominator}`)
+  useEffect(() => {
+    if (effectiveSidebarMode !== 'reviewing' || !reviewMediaKey || !reviewVideoRef.current) return
+
+    const video = reviewVideoRef.current
+    video.srcObject = null
+    const handleLoadedMetadata = () => setReviewDuration(video.duration || 0)
+    const handleTimeUpdate = () => setReviewCurrentTime(video.currentTime || 0)
+    const handlePlay = () => setReviewIsPlaying(true)
+    const handlePause = () => setReviewIsPlaying(false)
+    const handleEnded = () => setReviewIsPlaying(false)
+
+    video.addEventListener('loadedmetadata', handleLoadedMetadata)
+    video.addEventListener('timeupdate', handleTimeUpdate)
+    video.addEventListener('play', handlePlay)
+    video.addEventListener('pause', handlePause)
+    video.addEventListener('ended', handleEnded)
+    video.currentTime = 0
+    video.load()
+    const playPromise = video.play()
+    if (playPromise && typeof playPromise.catch === 'function') {
+      void playPromise.catch(() => {})
+    }
+
+    return () => {
+      video.removeEventListener('loadedmetadata', handleLoadedMetadata)
+      video.removeEventListener('timeupdate', handleTimeUpdate)
+      video.removeEventListener('play', handlePlay)
+      video.removeEventListener('pause', handlePause)
+      video.removeEventListener('ended', handleEnded)
+    }
+  }, [effectiveSidebarMode, reviewMediaKey])
+
+  useEffect(() => {
+    if (plyrRef.current) {
+      plyrRef.current.destroy()
+      plyrRef.current = null
+    }
+    if (!theaterMediaKey || !theaterVideoRef.current) return
+
+    const player = new Plyr(theaterVideoRef.current, {
+      controls: ['play-large', 'play', 'progress', 'current-time', 'duration', 'mute', 'volume', 'fullscreen'],
+      keyboard: { focused: true, global: false },
+      tooltips: { controls: true, seek: true },
+      resetOnEnd: true,
+    })
+    player.on('ready', () => {
+      const playPromise = player.play()
+      if (playPromise && typeof playPromise.catch === 'function') {
+        void playPromise.catch(() => {})
+      }
+    })
+    plyrRef.current = player
+
+    return () => {
+      if (plyrRef.current) {
+        plyrRef.current.destroy()
+        plyrRef.current = null
       }
     }
-  }, [])
-
-  const persistSongMetadata = useCallback(async (id: string, metadata: SongMetadata) => {
-    await window.electronAPI?.updateSong(id, metadata)
-    setLibraryRefreshKey(k => k + 1)
-
-    const songs = await window.electronAPI?.getAllSongs()
-    const song = songs?.find(s => s.id === id)
-
-    if (!song?.albumArt && (metadata.title || metadata.artist)) {
-      const artUrl = await fetchAlbumArt(metadata.title, metadata.artist)
-      if (artUrl) {
-        await window.electronAPI?.updateSong(id, { albumArt: artUrl })
-        setLibraryRefreshKey(k => k + 1)
-      }
-    }
-  }, [])
+  }, [theaterMediaKey])
 
   const handleApiReady = useCallback((api: alphaTab.AlphaTabApi) => {
     alphaTabApiRef.current = api
@@ -233,145 +262,141 @@ function App() {
       const playing = args.state === alphaTab.synth.PlayerState.Playing
       setIsPlaybackActive(playing)
       if (!playing) {
-        setAppState((current) => current === 'playing' ? 'idle' : current)
+        setAppState((current) => (current === 'playing' ? 'idle' : current))
       }
     })
-  }, [playbackSpeed, masterVolume])
+  }, [masterVolume, playbackSpeed])
 
-  const handleFileOpened = useCallback((id: string, title: string, artist: string) => {
-    setSongId(id)
+  const enterPlayWorkspace = useCallback((songId: string, title: string, artist: string) => {
+    setActiveSongId(songId)
     setSongTitle(title)
     setSongArtist(artist)
-    loadTakes(id)
+    setLeftView('play')
+    setSidebarMode('recording')
+    setReviewSelection(null)
+  }, [])
+
+  const handleFileOpened = useCallback((songId: string, title: string, artist: string) => {
+    enterPlayWorkspace(songId, title, artist)
+    void refreshSongTakes(songId)
     setTimeout(() => {
       extractScoreInfo()
       const scoreBpm = alphaTabApiRef.current?.score?.tempo ?? 0
-      void persistSongMetadata(id, { title, artist, bpm: scoreBpm })
+      void persistSongMetadata(songId, { title, artist, bpm: scoreBpm })
     }, 100)
-  }, [loadTakes, extractScoreInfo, persistSongMetadata])
+  }, [enterPlayWorkspace, extractScoreInfo, persistSongMetadata, refreshSongTakes])
 
   const handleLoadFromLibrary = useCallback(async (song: Song) => {
-    const result = await window.electronAPI!.loadSongFile(song.id)
-    if (result.error === 'file_not_found') {
-      alert('File no longer exists at the saved location.')
-      return
-    }
-    if (result.error) {
-      alert('Failed to read file.')
-      return
-    }
-    setSongId(song.id)
+    const result = await window.electronAPI?.loadSongFile(song.id)
+    if (!result) return
+    if (result.error === 'file_not_found') return alert('File no longer exists at the saved location.')
+    if (result.error || !result.buffer) return alert('Failed to read file.')
+
     const fileName = result.fileName || 'untitled.gp'
-    const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer!), fileName)
-    if (meta) {
-      setSongTitle(meta.title)
-      setSongArtist(meta.artist)
-    }
-    loadTakes(song.id)
+    const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(result.buffer), fileName)
+    const title = meta?.title ?? song.title
+    const artist = meta?.artist ?? song.artist
+    enterPlayWorkspace(song.id, title, artist)
+    await refreshSongTakes(song.id)
+
     setTimeout(() => {
       extractScoreInfo()
       const scoreBpm = alphaTabApiRef.current?.score?.tempo ?? 0
-      void persistSongMetadata(song.id, {
-        title: meta?.title ?? song.title,
-        artist: meta?.artist ?? song.artist,
-        bpm: scoreBpm,
-      })
+      void persistSongMetadata(song.id, { title, artist, bpm: scoreBpm })
     }, 100)
-  }, [loadTakes, extractScoreInfo, persistSongMetadata])
+  }, [enterPlayWorkspace, extractScoreInfo, persistSongMetadata, refreshSongTakes])
+
+  const handlePlayWorkspaceOpenFile = useCallback(async () => {
+    const result = await window.electronAPI?.openFileDialog()
+    if (!result || result.cancelled || !result.songId || !result.buffer) return
+
+    const buffer = new Uint8Array(result.buffer)
+    const extracted = extractSongMetadata(buffer)
+    const fileName = result.filePath?.split(/[/\\]/).pop() || 'untitled.gp'
+    const songId = result.songId
+    const meta = tabRendererRef.current?.loadFromBuffer(buffer, fileName)
+    const title = meta?.title || extracted?.title || ''
+    const artist = meta?.artist || extracted?.artist || ''
+    enterPlayWorkspace(songId, title, artist)
+    await refreshSongTakes(songId)
+
+    setTimeout(() => {
+      extractScoreInfo()
+      const scoreBpm = alphaTabApiRef.current?.score?.tempo ?? extracted?.bpm ?? 0
+      void persistSongMetadata(songId, { title, artist, bpm: scoreBpm })
+    }, 100)
+  }, [enterPlayWorkspace, extractScoreInfo, persistSongMetadata, refreshSongTakes])
 
   const handleTestTab = useCallback(async () => {
     try {
-      const res = await fetch('/test-tab.gp')
-      const buf = await res.arrayBuffer()
-      const fileName = 'test-tab.gp'
-      const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(buf), fileName)
-      const title = meta?.title || ''
-      const artist = meta?.artist || ''
-      // Test tab doesn't persist to the store — just load it locally
-      setSongId('')
-      setSongTitle(title)
-      setSongArtist(artist)
-      setTakes([])
+      const response = await fetch('/test-tab.gp')
+      const buffer = await response.arrayBuffer()
+      const meta = tabRendererRef.current?.loadFromBuffer(new Uint8Array(buffer), 'test-tab.gp')
+      setActiveSongId('')
+      setSongTitle(meta?.title || '')
+      setSongArtist(meta?.artist || '')
+      setLeftView('play')
+      setSidebarMode('recording')
+      setReviewSelection(null)
       setTimeout(extractScoreInfo, 100)
     } catch (err) {
       console.error('Failed to load test tab:', err)
     }
   }, [extractScoreInfo])
 
-  const handleLibraryFileOpen = useCallback(async () => {
-    const result = await window.electronAPI!.openFileDialog()
-    if (result.cancelled || !result.songId || !result.buffer) return
+  const handleClearLibrary = useCallback(async () => {
+    await window.electronAPI?.clearLibrary()
+    setSongs([])
+    setReviewSelection(null)
+    setTheaterSelection(null)
+    setSidebarMode('recording')
+  }, [])
 
-    const metadata = extractSongMetadata(new Uint8Array(result.buffer))
-    if (metadata) {
-      await persistSongMetadata(result.songId, metadata)
-      return
-    }
-
-    setLibraryRefreshKey(k => k + 1)
-  }, [persistSongMetadata])
-
-  const playTick = useCallback((isFirst: boolean) => {
-    const ctx = new AudioContext()
-    const osc = ctx.createOscillator()
-    const gain = ctx.createGain()
-    osc.connect(gain)
-    gain.connect(ctx.destination)
-    osc.frequency.value = isFirst ? 1000 : 800
-    gain.gain.setValueAtTime(0.5, ctx.currentTime)
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08)
-    osc.start(ctx.currentTime)
-    osc.stop(ctx.currentTime + 0.08)
-    osc.onended = () => ctx.close()
+  const playTick = useCallback((isFirstBeat: boolean) => {
+    const context = new AudioContext()
+    const oscillator = context.createOscillator()
+    const gain = context.createGain()
+    oscillator.connect(gain)
+    gain.connect(context.destination)
+    oscillator.frequency.value = isFirstBeat ? 1000 : 800
+    gain.gain.setValueAtTime(0.5, context.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.08)
+    oscillator.start(context.currentTime)
+    oscillator.stop(context.currentTime + 0.08)
+    oscillator.onended = () => context.close()
   }, [])
 
   const beginRecording = useCallback(() => {
-    if (streamRef.current) {
-      const recorder = new MediaRecorder(streamRef.current, {
-        mimeType: 'video/webm;codecs=vp9,opus',
-      })
-      chunksRef.current = []
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data)
-      }
-      recorder.onstop = async () => {
-        try {
-          const blob = new Blob(chunksRef.current, { type: 'video/webm' })
-          const arrayBuffer = await blob.arrayBuffer()
-          const result = await window.electronAPI!.saveVideoTake(arrayBuffer, songId, Math.round(playbackSpeed * 100))
-          if (result.success) {
-            console.log('Take saved:', result.path, result.take)
-            if (result.take) {
-              const freshTakes = await window.electronAPI!.getTakesForSong(songId)
-              setTakes(freshTakes)
-              setToastTake(result.take)
-            }
-          }
-        } catch (err) {
-          console.error('Failed to save take:', err)
+    if (!activeSongId || !streamRef.current) return
+    const recorder = new MediaRecorder(streamRef.current, { mimeType: 'video/webm;codecs=vp9,opus' })
+    chunksRef.current = []
+    recorder.ondataavailable = (event) => { if (event.data.size > 0) chunksRef.current.push(event.data) }
+    recorder.onstop = async () => {
+      try {
+        const blob = new Blob(chunksRef.current, { type: 'video/webm' })
+        const arrayBuffer = await blob.arrayBuffer()
+        const result = await window.electronAPI?.saveVideoTake(arrayBuffer, activeSongId, Math.round(playbackSpeed * 100))
+        if (result?.success && result.take) {
+          await refreshSongTakes(activeSongId)
+          setToastTake(result.take)
         }
+      } catch (err) {
+        console.error('Failed to save take:', err)
       }
-      recorderRef.current = recorder
-      recorder.start()
     }
+    recorderRef.current = recorder
+    recorder.start()
     alphaTabApiRef.current?.play()
     setIsPlaybackActive(true)
     setAppState('recording')
-  }, [songId, playbackSpeed])
+  }, [activeSongId, playbackSpeed, refreshSongTakes])
 
   const startCountdown = useCallback(() => {
-    if (!countInEnabled) {
-      // Skip count-in — start recording immediately
-      beginRecording()
-      return
-    }
-
-    const api = alphaTabApiRef.current
-    const score = api?.score
+    if (!countInEnabled) return beginRecording()
+    const score = alphaTabApiRef.current?.score
     const scoreBpm = score?.tempo ?? 120
     const beats = score?.masterBars?.[0]?.timeSignatureNumerator ?? 4
-    const msPerBeat = 60000 / scoreBpm
-
+    const millisecondsPerBeat = 60000 / scoreBpm
     alphaTabApiRef.current?.pause()
     setIsPlaybackActive(false)
     setAppState('countdown')
@@ -380,7 +405,7 @@ function App() {
 
     let remaining = beats
     const interval = setInterval(() => {
-      remaining--
+      remaining -= 1
       if (remaining === 0) {
         clearInterval(interval)
         setCountdown(0)
@@ -389,8 +414,8 @@ function App() {
         playTick(false)
         setCountdown(remaining)
       }
-    }, msPerBeat)
-  }, [countInEnabled, beginRecording, playTick])
+    }, millisecondsPerBeat)
+  }, [beginRecording, countInEnabled, playTick])
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop()
@@ -402,79 +427,75 @@ function App() {
   const togglePlay = useCallback(() => {
     const api = alphaTabApiRef.current
     if (!api) return
-
     const playing = api.playerState === alphaTab.synth.PlayerState.Playing
     if (playing) {
       api.pause()
       setIsPlaybackActive(false)
-      if (appState === 'playing') {
-        setAppState('idle')
-      }
+      if (appState === 'playing') setAppState('idle')
       return
     }
-
     api.play()
     setIsPlaybackActive(true)
-    if (appState !== 'recording') {
-      setAppState('playing')
-    }
+    if (appState !== 'recording') setAppState('playing')
   }, [appState])
 
   const toggleMetronome = useCallback(() => {
-    const next = !metronomeOn
-    setMetronomeOn(next)
+    const nextValue = !metronomeOn
+    setMetronomeOn(nextValue)
     if (alphaTabApiRef.current) {
-      alphaTabApiRef.current.metronomeVolume = next ? 1 : 0
+      alphaTabApiRef.current.metronomeVolume = nextValue ? 1 : 0
     }
   }, [metronomeOn])
 
   useEffect(() => {
-    if (alphaTabApiRef.current) {
-      alphaTabApiRef.current.playbackSpeed = playbackSpeed
-    }
+    if (alphaTabApiRef.current) alphaTabApiRef.current.playbackSpeed = playbackSpeed
   }, [playbackSpeed])
 
   useEffect(() => {
-    if (alphaTabApiRef.current) {
-      alphaTabApiRef.current.masterVolume = masterVolume
-    }
+    if (alphaTabApiRef.current) alphaTabApiRef.current.masterVolume = masterVolume
   }, [masterVolume])
 
-  // Keyboard shortcuts
   useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      const tag = (e.target as HTMLElement).tagName
+    function handleKeyDown(event: KeyboardEvent) {
+      const tag = (event.target as HTMLElement).tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
 
-      if (e.key === 'Escape' && theaterTake) {
-        setTheaterTake(null)
-      }
-      if ((e.key === 'r' || e.key === 'R' || e.key === 'р' || e.key === 'Р') && !e.ctrlKey && !e.metaKey) {
-        if (appState === 'recording') {
-          stopRecording()
-        } else if ((appState === 'idle' || appState === 'playing') && scoreLoaded && !cameraError) {
-          startCountdown()
+      if (event.key === 'Escape') {
+        if (theaterSelection) {
+          setTheaterSelection(null)
+          return
+        }
+        if (effectiveSidebarMode === 'reviewing') {
+          exitReviewMode()
         }
       }
-      if ((e.key === ' ' || e.key === 'k' || e.key === 'K' || e.key === 'к' || e.key === 'К') && !e.ctrlKey && !e.metaKey) {
-        e.preventDefault()
-        if (scoreLoaded && appState !== 'countdown') {
-          togglePlay()
-        }
+
+      if ((event.key === 'r' || event.key === 'R' || event.key === 'р' || event.key === 'Р') && !event.ctrlKey && !event.metaKey) {
+        if (appState === 'recording') stopRecording()
+        else if ((appState === 'idle' || appState === 'playing') && scoreLoaded && !cameraError && !!activeSongId) startCountdown()
       }
-      if ((e.key === 'm' || e.key === 'M' || e.key === 'м' || e.key === 'М') && !e.ctrlKey && !e.metaKey) {
+      if ((event.key === ' ' || event.key === 'k' || event.key === 'K' || event.key === 'к' || event.key === 'К') && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        if (scoreLoaded && appState !== 'countdown') togglePlay()
+      }
+      if ((event.key === 'm' || event.key === 'M' || event.key === 'м' || event.key === 'М') && !event.ctrlKey && !event.metaKey) {
         if (scoreLoaded) toggleMetronome()
       }
-      if ((e.key === 'c' || e.key === 'C' || e.key === 'ц' || e.key === 'Ц') && !e.ctrlKey && !e.metaKey) {
-        if (scoreLoaded) setCountInEnabled(prev => !prev)
+      if ((event.key === 'c' || event.key === 'C' || event.key === 'ц' || event.key === 'Ц') && !event.ctrlKey && !event.metaKey) {
+        if (scoreLoaded) setCountInEnabled((current) => !current)
       }
-      if (e.key === 'Enter') {
-        e.preventDefault()
-      }
+      if (event.key === 'Enter') event.preventDefault()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [theaterTake, appState, scoreLoaded, cameraError, startCountdown, stopRecording, togglePlay, toggleMetronome])
+  }, [activeSongId, appState, cameraError, effectiveSidebarMode, exitReviewMode, scoreLoaded, startCountdown, stopRecording, theaterSelection, toggleMetronome, togglePlay])
+
+  const handleSetLeftView = useCallback((view: LeftView) => {
+    setLeftView(view)
+    if (view === 'play') {
+      exitReviewMode()
+    }
+  }, [exitReviewMode])
 
   const handleSongClosed = useCallback(() => {
     recorderRef.current?.stop()
@@ -482,460 +503,149 @@ function App() {
     setIsPlaybackActive(false)
     setAppState('idle')
     setScoreLoaded(false)
-    setSongId('')
+    setActiveSongId('')
     setSongTitle('')
     setSongArtist('')
     setBpm(0)
     setTimeSig('')
-    setTakes([])
-    setLibraryRefreshKey(k => k + 1)
   }, [])
 
-  useEffect(() => {
-    if (plyrRef.current) {
-      plyrRef.current.destroy()
-      plyrRef.current = null
+  const handleRateTake = useCallback(async (songId: string, takeId: string, rating: number) => {
+    await window.electronAPI?.updateTakeRating(songId, takeId, rating)
+    updateSongTakes(songId, (takes) => takes.map((take) => take.id === takeId ? { ...take, rating } : take))
+  }, [updateSongTakes])
+
+  const handleRenameTake = useCallback(async (songId: string, takeId: string, name: string) => {
+    await window.electronAPI?.renameTake(songId, takeId, name)
+    updateSongTakes(songId, (takes) => takes.map((take) => take.id === takeId ? { ...take, name } : take))
+  }, [updateSongTakes])
+
+  const handleDeleteTake = useCallback(async (songId: string, takeId: string) => {
+    await window.electronAPI?.deleteTake(songId, takeId)
+    updateSongTakes(songId, (takes) => takes.filter((take) => take.id !== takeId))
+    setToastTake((current) => (current?.id === takeId ? null : current))
+    setReviewSelection((current) => (current?.songId === songId && current.takeId === takeId ? null : current))
+    setTheaterSelection((current) => (current?.songId === songId && current.takeId === takeId ? null : current))
+    if (reviewSelection?.songId === songId && reviewSelection.takeId === takeId) {
+      setSidebarMode('recording')
     }
-
-    if (theaterTake && theaterVideoRef.current) {
-      const player = new Plyr(theaterVideoRef.current, {
-        controls: ['play-large', 'play', 'progress', 'current-time', 'duration', 'mute', 'volume', 'fullscreen'],
-        keyboard: { focused: true, global: false },
-        tooltips: { controls: true, seek: true },
-        resetOnEnd: true,
-      })
-
-      player.on('ready', () => {
-        Promise.resolve(player.play()).catch(() => {})
-      })
-
-      plyrRef.current = player
-    }
-
-    return () => {
-      if (plyrRef.current) {
-        plyrRef.current.destroy()
-        plyrRef.current = null
-      }
-    }
-  }, [theaterTake])
-
-  const closeTheater = useCallback(() => {
-    if (plyrRef.current) {
-      plyrRef.current.destroy()
-      plyrRef.current = null
-    }
-    setTheaterTake(null)
-  }, [])
+  }, [reviewSelection, updateSongTakes])
 
   return (
-    <div className="h-dvh w-screen bg-charcoal grid grid-cols-[75%_25%] overflow-hidden select-none relative">
+    <div className="relative grid h-dvh w-screen select-none overflow-hidden bg-charcoal grid-cols-[75%_25%]">
+      <LeftWorkspace
+        leftView={leftView}
+        scoreLoaded={scoreLoaded}
+        songTitle={songTitle}
+        songArtist={songArtist}
+        bpm={bpm}
+        timeSig={timeSig}
+        isPlaybackActive={isPlaybackActive}
+        appState={appState}
+        activeSongId={activeSongId}
+        songs={songs}
+        activeLibraryFilter={activeLibraryFilter}
+        reviewSelection={effectiveReviewSelection}
+        onSetLeftView={handleSetLeftView}
+        onTogglePlay={togglePlay}
+        onLoadSong={handleLoadFromLibrary}
+        onOpenFile={handlePlayWorkspaceOpenFile}
+        onClearAll={handleClearLibrary}
+        onTestTab={handleTestTab}
+        onFilterChange={setActiveLibraryFilter}
+        onRateTake={handleRateTake}
+        onDeleteTake={(songId, takeId) => { void handleDeleteTake(songId, takeId) }}
+        onPlayTake={(songId, takeId) => {
+          resetReviewPlaybackState()
+          setReviewSelection({ songId, takeId })
+          setSidebarMode('reviewing')
+        }}
+        onExpandTake={(songId, takeId) => setTheaterSelection({ songId, takeId })}
+      >
+        <TabRenderer
+          ref={tabRendererRef}
+          onApiReady={handleApiReady}
+          onScoreLoaded={() => {
+            setScoreLoaded(true)
+            setTimeout(extractScoreInfo, 100)
+          }}
+          onFileOpened={handleFileOpened}
+          onSongClosed={handleSongClosed}
+        />
+      </LeftWorkspace>
 
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* LEFT COLUMN — Song Header + Tablature                  */}
-      {/* ═══════════════════════════════════════════════════════ */}
-      <div className="flex flex-col overflow-hidden min-h-0">
+      <SidebarPanel
+        sidebarMode={effectiveSidebarMode}
+        appState={appState}
+        cameraError={cameraError}
+        scoreLoaded={scoreLoaded}
+        activeSongId={activeSongId}
+        activeSong={activeSong}
+        reviewSong={reviewSong}
+        reviewTake={reviewTake}
+        reviewSelection={effectiveReviewSelection}
+        sidebarTakes={sidebarTakes}
+        reviewIsPlaying={reviewIsPlaying}
+        reviewCurrentTime={reviewCurrentTime}
+        reviewDuration={reviewDuration}
+        playbackSpeed={playbackSpeed}
+        masterVolume={masterVolume}
+        metronomeOn={metronomeOn}
+        countInEnabled={countInEnabled}
+        isPlaybackActive={isPlaybackActive}
+        videoRef={videoRef}
+        reviewVideoRef={reviewVideoRef}
+        onOpenReview={(songId, takeId) => {
+          resetReviewPlaybackState()
+          setReviewSelection({ songId, takeId })
+          setSidebarMode('reviewing')
+        }}
+        onRateTake={(songId, takeId, rating) => { void handleRateTake(songId, takeId, rating) }}
+        onDeleteTake={(songId, takeId) => { void handleDeleteTake(songId, takeId) }}
+        onRefreshSongTakes={(songId) => { void refreshSongTakes(songId) }}
+        onStartCountdown={startCountdown}
+        onStopRecording={stopRecording}
+        onTogglePlay={togglePlay}
+        onToggleMetronome={toggleMetronome}
+        onToggleCountIn={() => setCountInEnabled((current) => !current)}
+        onSetPlaybackSpeed={setPlaybackSpeed}
+        onSetMasterVolume={setMasterVolume}
+        onOpenTheater={(songId, takeId) => setTheaterSelection({ songId, takeId })}
+        onExitReview={exitReviewMode}
+        onShowTakeInFolder={(filePath) => { void window.electronAPI?.showInFolder(filePath) }}
+      />
 
-        {/* Song Header */}
-        {scoreLoaded && (
-          <div className="shrink-0 px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-            <div>
-              <h1 className="text-zinc-100 text-sm font-semibold tracking-wide uppercase">
-                {songArtist && <>{songArtist} — </>}"{songTitle || 'Untitled'}"
-              </h1>
-              <div className="flex items-center gap-4 mt-0.5">
-                <span className="text-zinc-500 text-[11px] font-mono uppercase tracking-wider">
-                  BPM: {bpm || '—'}
-                </span>
-                <span className="text-zinc-500 text-[11px] font-mono uppercase tracking-wider">
-                  Time Sig: {timeSig || '—'}
-                </span>
-              </div>
-            </div>
-            <button
-              onClick={togglePlay}
-              disabled={!scoreLoaded || appState === 'countdown'}
-              className={`w-10 h-10 rounded-full flex items-center justify-center border transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
-                isPlaybackActive
-                  ? 'bg-amber-accent/20 border-amber-accent/60 text-amber-accent'
-                  : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-600'
-              }`}
-              aria-label={isPlaybackActive ? 'Pause playback' : 'Play tab'}
-            >
-              {isPlaybackActive ? (
-                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
-                  <rect x="6" y="5" width="4" height="14" rx="1" />
-                  <rect x="14" y="5" width="4" height="14" rx="1" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
-                  <path d="M8 5.14v14.72a1 1 0 001.5.86l11-7.36a1 1 0 000-1.72l-11-7.36A1 1 0 008 5.14z" />
-                </svg>
-              )}
-            </button>
-          </div>
-        )}
+      <TheaterOverlay
+        take={theaterTake}
+        songId={theaterSelection?.songId ?? null}
+        videoRef={theaterVideoRef}
+        onClose={() => setTheaterSelection(null)}
+        onRate={(songId, takeId, rating) => { void handleRateTake(songId, takeId, rating) }}
+        onDelete={(songId, takeId) => { void handleDeleteTake(songId, takeId) }}
+        onShowInFolder={(filePath) => { void window.electronAPI?.showInFolder(filePath) }}
+        onTakeMissing={(songId) => { void refreshSongTakes(songId) }}
+      />
 
-        {/* Tablature Area */}
-        <div className="flex-1 overflow-hidden min-h-0 relative">
-          <TabRenderer
-            ref={tabRendererRef}
-            onApiReady={handleApiReady}
-            onScoreLoaded={() => {
-              setScoreLoaded(true)
-              setTimeout(extractScoreInfo, 100)
-            }}
-            onFileOpened={handleFileOpened}
-            onSongClosed={handleSongClosed}
-          />
-
-          {/* Song Library — shown when no score is loaded */}
-          {!scoreLoaded && (
-            <div className="absolute inset-0 z-10 bg-charcoal">
-              <SongLibrary
-                onSongSelect={handleLoadFromLibrary}
-                onFileOpen={handleLibraryFileOpen}
-                onTestTab={handleTestTab}
-                refreshKey={libraryRefreshKey}
-              />
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* RIGHT COLUMN — Sidebar                                 */}
-      {/* ═══════════════════════════════════════════════════════ */}
-      <div className="flex flex-col bg-charcoal-light border-l border-zinc-800 overflow-hidden">
-
-        {/* App Title Bar */}
-        <div className="shrink-0 px-4 py-2.5 border-b border-zinc-800 text-center">
-          <span className="text-[11px] font-semibold tracking-[0.25em] uppercase text-zinc-500">GuitarApp</span>
-        </div>
-
-        {/* Live Feed — Webcam */}
-        <div className="shrink-0 px-3 pt-3">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-[10px] font-semibold tracking-widest uppercase text-zinc-500">Live Feed</span>
-            <span className="text-[10px] font-mono text-zinc-600 uppercase">
-              Active: <span className="text-zinc-400">User</span>
-            </span>
-          </div>
-          <div className="relative aspect-video bg-black rounded-lg overflow-hidden border border-zinc-800">
-            {cameraError ? (
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-500 text-xs gap-1">
-                <span>Camera unavailable</span>
-                <code className="text-red-400 text-[10px]">{cameraError}</code>
-              </div>
-            ) : (
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="absolute inset-0 w-full h-full object-cover scale-x-[-1]"
-              />
-            )}
-            {/* Recording indicator */}
-            <div className="absolute top-2 left-2 flex items-center gap-1.5">
-              <div
-                className={`w-1.5 h-1.5 rounded-full ${
-                  appState === 'recording' ? 'bg-red-500 animate-pulse' : 'bg-zinc-600'
-                }`}
-              />
-              <span className="text-[9px] font-mono uppercase tracking-widest text-zinc-400">
-                {appState === 'recording' ? 'REC' : 'LIVE'}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Control Deck */}
-        <div className="shrink-0 px-3 pt-4">
-          <span className="text-[10px] font-semibold tracking-widest uppercase text-zinc-500 block mb-3">Control Deck</span>
-
-          {/* Tuner + Sliders */}
-          <div className="flex flex-col gap-3 mb-4">
-            <select className="pill-select bg-zinc-800/80 text-zinc-300 text-xs border border-zinc-700 rounded-full px-4 py-2 focus:outline-none focus:border-amber-accent/50 cursor-pointer">
-              <option>Tuner: E STANDARD</option>
-              <option>Tuner: DROP D</option>
-              <option>Tuner: D STANDARD</option>
-              <option>Tuner: OPEN G</option>
-            </select>
-
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">speed</span>
-                <span className="text-[10px] font-semibold tracking-widest text-amber-accent">{Math.round(playbackSpeed * 100)}%</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={Math.round(playbackSpeed * 100)}
-                onChange={(e) => setPlaybackSpeed(Number(e.target.value) / 100)}
-                className="amber-slider w-full"
-                style={{ background: `linear-gradient(90deg, #E09800 0%, #FFB703 ${playbackSpeed * 50}%, #FFCA40 ${playbackSpeed * 100}%, #2a2a2a ${playbackSpeed * 100}%)` }}
-              />
-            </div>
-
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">volume</span>
-                <span className="text-[10px] font-semibold tracking-widest text-amber-accent">{Math.round(masterVolume * 100)}%</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={Math.round(masterVolume * 100)}
-                onChange={(e) => setMasterVolume(Number(e.target.value) / 100)}
-                className="amber-slider w-full"
-                style={{ background: `linear-gradient(90deg, #E09800 0%, #FFB703 ${masterVolume * 50}%, #FFCA40 ${masterVolume * 100}%, #2a2a2a ${masterVolume * 100}%)` }}
-              />
-            </div>
-          </div>
-
-          {/* Record + Playback Controls */}
-          <div className="flex items-center justify-center gap-3">
-            {/* Record Button — Pill */}
-            {appState === 'recording' ? (
-              <button
-                onClick={stopRecording}
-                className="h-11 px-5 rounded-full bg-charcoal border-2 border-red-500/80 flex items-center gap-2 transition-all hover:border-red-400 active:scale-95"
-                aria-label="Stop recording"
-              >
-                <div className="w-3.5 h-3.5 rounded-sm bg-red-500" />
-                <span className="text-red-500 text-xs font-bold tracking-wider">RECORD</span>
-              </button>
-            ) : (
-              <button
-                onClick={startCountdown}
-                disabled={appState === 'countdown' || !!cameraError || !scoreLoaded}
-                className="h-11 px-5 rounded-full bg-amber-accent/10 border-2 border-amber-accent flex items-center gap-2 transition-all hover:bg-amber-accent/20 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed animate-glowAmber"
-                aria-label="Start recording"
-              >
-                <div className="w-3 h-3 rounded-full bg-amber-accent" />
-                <span className="text-amber-accent text-xs font-bold tracking-wider">RECORD</span>
-              </button>
-            )}
-
-            {/* Play / Pause */}
-            <button
-              onClick={togglePlay}
-              disabled={!scoreLoaded || appState === 'countdown'}
-              className={`w-9 h-9 rounded-full flex items-center justify-center border transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
-                isPlaybackActive
-                  ? 'bg-amber-accent/20 border-amber-accent/50 text-amber-accent'
-                  : 'bg-zinc-800 border-zinc-700 text-zinc-500 hover:border-zinc-600'
-              }`}
-              aria-label={isPlaybackActive ? 'Pause playback' : 'Play tab'}
-            >
-              {isPlaybackActive ? (
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
-                  <rect x="6" y="5" width="4" height="14" rx="1" />
-                  <rect x="14" y="5" width="4" height="14" rx="1" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
-                  <path d="M8 5.14v14.72a1 1 0 001.5.86l11-7.36a1 1 0 000-1.72l-11-7.36A1 1 0 008 5.14z" />
-                </svg>
-              )}
-            </button>
-
-            {/* Metronome Toggle */}
-            <button
-              onClick={toggleMetronome}
-              disabled={!scoreLoaded}
-              className={`w-9 h-9 rounded-full flex items-center justify-center border transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
-                metronomeOn
-                  ? 'bg-amber-accent/20 border-amber-accent/50 text-amber-accent'
-                  : 'bg-zinc-800 border-zinc-700 text-zinc-500 hover:border-zinc-600'
-              }`}
-              aria-label="Toggle metronome"
-            >
-              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 2L8 22h8L12 2z" />
-                <line x1="12" y1="8" x2="18" y2="4" />
-              </svg>
-            </button>
-
-            {/* Count-In Toggle */}
-            <button
-              onClick={() => setCountInEnabled(prev => !prev)}
-              disabled={!scoreLoaded}
-              className={`w-9 h-9 rounded-full flex items-center justify-center border transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
-                countInEnabled
-                  ? 'bg-amber-accent/20 border-amber-accent/50 text-amber-accent'
-                  : 'bg-zinc-800 border-zinc-700 text-zinc-500 hover:border-zinc-600'
-              }`}
-              aria-label="Toggle count-in"
-              title={countInEnabled ? 'Count-in: ON' : 'Count-in: OFF'}
-            >
-              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 6v6l4 2" />
-                <circle cx="12" cy="12" r="10" />
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        {/* Takes Vault */}
-        <div className="flex-1 flex flex-col min-h-0 px-3 pt-4 pb-3">
-          <span className="text-[10px] font-semibold tracking-widest uppercase text-zinc-500 mb-2 shrink-0">
-            Takes Vault ({takes.length})
-          </span>
-
-          <div className="flex-1 overflow-y-auto min-h-0 space-y-1.5">
-            {takes.length === 0 && (
-              <p className="text-zinc-600 text-xs text-center py-4">No takes yet</p>
-            )}
-            {[...takes].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).map((take) => (
-              <div
-                key={take.id}
-                onClick={() => setTheaterTake(take)}
-                className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg bg-zinc-800/40 border border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/60 transition-all group cursor-pointer"
-              >
-                {/* Video thumbnail */}
-                <div className="shrink-0">
-                  <TakeThumbnail
-                    filePath={take.filePath}
-                    onFileMissing={() => {
-                      setTakes(prev => prev.filter(t => t.id !== take.id))
-                    }}
-                  />
-                </div>
-                {/* Take info */}
-                <div className="flex-1 min-w-0">
-                  <p className="text-zinc-300 text-xs font-medium truncate">{take.name || `Take #${take.takeNumber}`}</p>
-                  <p className="text-zinc-500 text-[10px] font-mono">{formatDate(take.createdAt)}</p>
-                  <p className="text-zinc-600 text-[10px] font-mono">{take.speed}% Speed</p>
-                </div>
-                {/* Delete take */}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    window.electronAPI?.deleteTake(songId, take.id)
-                    setTakes(prev => prev.filter(t => t.id !== take.id))
-                  }}
-                  className="shrink-0 opacity-0 group-hover:opacity-100 transition-all hover:scale-110 text-zinc-600 hover:text-red-500"
-                  aria-label="Delete take"
-                >
-                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 6h18" />
-                    <path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-                    <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
-                  </svg>
-                </button>
-                {/* Score + Icon rating */}
-                <div className={`shrink-0 flex items-center gap-1 font-mono text-[11px] ${take.rating ? 'text-amber-accent' : 'text-zinc-600'}`}>
-                  <svg viewBox="0 0 24 24" className={`w-3.5 h-3.5 ${take.rating ? 'fill-amber-accent' : 'fill-none'}`} stroke="currentColor" strokeWidth="1.5">
-                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-                  </svg>
-                  <span>{take.rating ? `${take.rating}/5` : '--'}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* Theater Mode Overlay                                    */}
-      {/* ═══════════════════════════════════════════════════════ */}
-      {theaterTake && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
-          onClick={closeTheater}
-        >
-          {/* Close button */}
-          <button
-            onClick={closeTheater}
-            className="absolute top-5 right-5 w-10 h-10 rounded-full bg-zinc-800/80 border border-zinc-700 flex items-center justify-center text-zinc-400 hover:text-white hover:border-zinc-500 transition-all z-10"
-            aria-label="Close theater mode"
-          >
-            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
-          </button>
-
-          {/* Take info header */}
-          <div className="absolute top-5 left-5 z-10">
-            <p className="text-zinc-300 text-sm font-medium">
-              {theaterTake.name || `Take #${theaterTake.takeNumber}`}
-            </p>
-            <p className="text-zinc-500 text-xs font-mono">{formatDate(theaterTake.createdAt)} &middot; {theaterTake.speed}% Speed</p>
-          </div>
-
-          {/* Video player + Action Bar */}
-          <div
-            className="flex flex-col items-center"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="w-[70vw] aspect-video rounded-t-lg shadow-2xl bg-black overflow-hidden relative">
-              <video
-                ref={theaterVideoRef}
-                src={takeVideoUrl(theaterTake.filePath)}
-                className="absolute inset-0 w-full h-full object-contain"
-                onError={() => {
-                  console.warn('Theater video failed to load — file may be missing:', theaterTake.filePath)
-                  setTakes(prev => prev.filter(t => t.id !== theaterTake.id))
-                  setTheaterTake(null)
-                }}
-              />
-            </div>
-            <TheaterActionBar
-              take={theaterTake}
-              onRate={(rating) => {
-                window.electronAPI?.updateTakeRating(songId, theaterTake.id, rating)
-                setTakes(prev => prev.map(t => t.id === theaterTake.id ? { ...t, rating } : t))
-                setTheaterTake(prev => prev ? { ...prev, rating } : null)
-              }}
-              onDelete={() => {
-                window.electronAPI?.deleteTake(songId, theaterTake.id)
-                setTakes(prev => prev.filter(t => t.id !== theaterTake.id))
-                closeTheater()
-              }}
-              onShowInFolder={() => {
-                window.electronAPI?.showInFolder(theaterTake.filePath)
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Take Saved Toast */}
-      {toastTake && (
+      {toastTake && activeSongId && (
         <TakeToast
           key={toastTake.id}
-          defaultName={`Take #${toastTake.takeNumber}`}
-          onRename={(newName) => {
-            window.electronAPI?.renameTake(songId, toastTake.id, newName)
-            setTakes(prev => prev.map(t => t.id === toastTake.id ? { ...t, name: newName } : t))
-          }}
-          onRate={(score) => {
-            window.electronAPI?.updateTakeRating(songId, toastTake.id, score)
-            setTakes(prev => prev.map(t => t.id === toastTake.id ? { ...t, rating: score } : t))
-          }}
+          defaultName={getTakeDisplayName(toastTake)}
+          onRename={(newName) => { void handleRenameTake(activeSongId, toastTake.id, newName) }}
+          onRate={(score) => { void handleRateTake(activeSongId, toastTake.id, score) }}
           onDelete={() => {
-            window.electronAPI?.deleteTake(songId, toastTake.id)
-            setTakes(prev => prev.filter(t => t.id !== toastTake.id))
+            void handleDeleteTake(activeSongId, toastTake.id)
             setToastTake(null)
           }}
-          onFavorite={(isFav) => {
-            console.log('Favorite take:', toastTake.id, isFav)
+          onFavorite={(isFavorite) => {
+            console.log('Favorite take:', toastTake.id, isFavorite)
           }}
           onDismiss={() => setToastTake(null)}
         />
       )}
 
-      {/* Countdown Overlay */}
       {appState === 'countdown' && countdown > 0 && (
-        <div className="absolute inset-0 z-40 bg-black/70 backdrop-blur-sm flex items-center justify-center">
-          <span
-            key={countdown}
-            className="text-[160px] font-bold text-white tabular-nums animate-[countPulse_1s_ease-out]"
-          >
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <span key={countdown} className="animate-[countPulse_1s_ease-out] text-[160px] font-bold tabular-nums text-white">
             {countdown}
           </span>
         </div>

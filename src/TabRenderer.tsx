@@ -272,14 +272,4 @@ const TabRenderer = forwardRef<TabRendererHandle, TabRendererProps>(
   )
 })
 
-export function toggleStandardNotation(api: alphaTab.AlphaTabApi, showNotes: boolean) {
-  for (const track of api.tracks) {
-    for (const staff of track.staves) {
-      staff.showTablature = true
-      staff.showStandardNotation = showNotes
-    }
-  }
-  api.render()
-}
-
 export default TabRenderer

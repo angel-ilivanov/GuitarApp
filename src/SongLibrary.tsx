@@ -1,47 +1,48 @@
-import { useEffect, useState } from 'react'
 import SongCard from './SongCard'
 
 interface SongLibraryProps {
+  songs: Song[]
   onSongSelect: (song: Song) => void
   onFileOpen: () => void
+  onClearAll: () => void
   onTestTab?: () => void
-  refreshKey: number
+  selectedSongId?: string
 }
 
-export default function SongLibrary({ onSongSelect, onFileOpen, onTestTab, refreshKey }: SongLibraryProps) {
-  const [songs, setSongs] = useState<Song[]>([])
-
-  useEffect(() => {
-    window.electronAPI?.getAllSongs().then(setSongs)
-  }, [refreshKey])
-
+export default function SongLibrary({
+  songs,
+  onSongSelect,
+  onFileOpen,
+  onClearAll,
+  onTestTab,
+  selectedSongId,
+}: SongLibraryProps) {
   return (
     <div className="h-full overflow-y-auto px-10 py-8">
-      {/* Title + Clear */}
-      <div className="flex items-center justify-between mb-8">
-        <h1 className="text-zinc-100 text-3xl font-light italic tracking-wide" style={{ fontFamily: 'Georgia, "Times New Roman", serif' }}>
-          My Songs
-        </h1>
+      <div className="mb-8 flex items-end justify-between">
+        <div>
+          <h1 className="text-3xl font-light italic tracking-wide text-zinc-100" style={{ fontFamily: 'Georgia, "Times New Roman", serif' }}>
+            Play
+          </h1>
+          <p className="mt-2 text-sm text-zinc-500">Open a tab, load a recent song, and keep the workspace ready for recording.</p>
+        </div>
         {songs.length > 0 && (
           <button
-            onClick={async () => {
-              await window.electronAPI?.clearLibrary()
-              setSongs([])
-            }}
-            className="text-zinc-600 text-xs hover:text-red-400 transition-colors cursor-pointer"
+            onClick={onClearAll}
+            className="cursor-pointer text-xs text-zinc-600 transition-colors duration-150 ease-in-out hover:text-red-400"
           >
             Clear All
           </button>
         )}
       </div>
 
-      {/* Song Grid */}
       {songs.length > 0 && (
-        <div className="grid grid-cols-3 gap-4 mb-10">
+        <div className="mb-10 grid grid-cols-3 gap-4">
           {songs.map((song) => (
             <SongCard
               key={song.id}
               song={song}
+              active={song.id === selectedSongId}
               onClick={() => onSongSelect(song)}
             />
           ))}
