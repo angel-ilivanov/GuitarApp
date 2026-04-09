@@ -36,9 +36,8 @@ export default function TakeToast({
   const rafRef = useRef<number>(0)
   const dismissedRef = useRef(false)
 
-  // --- Timer via requestAnimationFrame ---
-  const tick = useCallback(
-    (now: number) => {
+  useEffect(() => {
+    const tick = (now: number) => {
       if (dismissedRef.current) return
       if (lastFrameRef.current === 0) lastFrameRef.current = now
 
@@ -56,15 +55,13 @@ export default function TakeToast({
         onDismiss()
         return
       }
-      rafRef.current = requestAnimationFrame(tick)
-    },
-    [duration, onDismiss, onRename],
-  )
 
-  useEffect(() => {
+      rafRef.current = requestAnimationFrame(tick)
+    }
+
     rafRef.current = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafRef.current)
-  }, [tick])
+  }, [duration, onDismiss, onRename])
 
   // --- Pause / resume helpers ---
   const pause = useCallback(() => {
