@@ -179,3 +179,21 @@ html, body, #root {
 .plyr--full-ui input[type="range"] {
   filter: drop-shadow(0 0 4px rgba(255, 183, 3, 0.3));
 }
+
+.plyr__progress,
+.plyr__progress *,
+.plyr__volume,
+.plyr__volume *,
+.plyr__progress__buffer,
+.plyr--full-ui input[type="range"],
+.plyr--full-ui input[type="range"]::-webkit-slider-runnable-track,
+.plyr--full-ui input[type="range"]::-webkit-slider-thumb,
+.plyr--full-ui input[type="range"]::-moz-range-track,
+.plyr--full-ui input[type="range"]::-moz-range-progress,
+.plyr--full-ui input[type="range"]::-moz-range-thumb,
+.plyr--full-ui input[type="range"]::-ms-track,
+.plyr--full-ui input[type="range"]::-ms-fill-lower,
+.plyr--full-ui input[type="range"]::-ms-fill-upper,
+.plyr--full-ui input[type="range"]::-ms-thumb {
+  cursor: pointer !important;
+}

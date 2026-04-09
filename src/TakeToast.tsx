@@ -17,7 +17,7 @@ export default function TakeToast({
   onDelete,
   onFavorite,
   onDismiss,
-  duration = 5000,
+  duration = 10000,
 }: TakeToastProps) {
   const [name, setName] = useState(defaultName)
   const [rating, setRating] = useState(0)
